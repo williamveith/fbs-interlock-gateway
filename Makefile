@@ -1,7 +1,7 @@
 APP=fbs-interlock-gateway
 PI_USER=wev222
-PI_HOST=print-bridge.local
-PI_DIR=/opt/fbs-interlock-gateway
+PI_HOST=fbs-interlock-gateway.local
+PI_DIR=/opt/fbs-interlock-ping raspberrypi.localgateway
 
 SERVICE_DIR := services
 BUILD_DIR := build

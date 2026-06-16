@@ -56,6 +56,36 @@ type responseRecorder struct {
 	body   strings.Builder
 }
 
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
+func boolState(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+type FBSResponse struct {
+	Success int `json:"Success"`
+	State   int `json:"State"`
+}
+
+func writeFBS(w http.ResponseWriter, state bool) {
+	body := fmt.Sprintf(`{"Success":1,"State":%d}`, boolState(state))
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(http.StatusOK)
+
+	if _, err := w.Write([]byte(body)); err != nil {
+		log.Printf("failed to write FBS response: %v", err)
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	flag.Parse()
@@ -76,12 +106,6 @@ func main() {
 	if cfg.Defaults.SafeStateOnError == "" {
 		cfg.Defaults.SafeStateOnError = "off"
 	}
-
-	var (
-		version = "dev"
-		commit  = "unknown"
-		date    = "unknown"
-	)
 
 	log.Printf("fbs-interlock-gateway version=%s commit=%s date=%s", version, commit, date)
 
@@ -207,13 +231,8 @@ func (g *Gateway) handleFBSRequest(w http.ResponseWriter, r *http.Request, tool 
 		g.handleSet(w, tool, false)
 
 	default:
-		// Return a controlled response instead of crashing/erroring hard.
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status": "unknown_request",
-			"tool":   tool.InterlockName,
-			"path":   r.URL.Path,
-			"query":  r.URL.RawQuery,
-		})
+		log.Printf("tool=%s unknown_request path=%s query=%s", tool.InterlockName, r.URL.Path, r.URL.RawQuery)
+		writeFBS(w, false)
 	}
 }
 
@@ -245,28 +264,11 @@ func (g *Gateway) handleStatus(w http.ResponseWriter, tool Tool) {
 			safeOutput = true
 		}
 
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":    "error",
-			"connected": false,
-			"tool":      tool.InterlockName,
-			"relay":     onOff(safeOutput),
-			"state":     onOff(safeOutput),
-			"output":    safeOutput,
-			"ison":      safeOutput,
-			"error":     err.Error(),
-		})
+		writeFBS(w, safeOutput)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":    "ok",
-		"connected": true,
-		"tool":      tool.InterlockName,
-		"relay":     onOff(status.Output),
-		"state":     onOff(status.Output),
-		"output":    status.Output,
-		"ison":      status.Output,
-	})
+	writeFBS(w, status.Output)
 }
 
 func (g *Gateway) handleSet(w http.ResponseWriter, tool Tool, on bool) {
@@ -274,26 +276,16 @@ func (g *Gateway) handleSet(w http.ResponseWriter, tool Tool, on bool) {
 	if err != nil {
 		log.Printf("tool=%s shelly_set_error command=%s error=%v", tool.InterlockName, onOff(on), err)
 
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":    "error",
-			"connected": false,
-			"tool":      tool.InterlockName,
-			"command":   onOff(on),
-			"error":     err.Error(),
-		})
+		safeOutput := false
+		if strings.EqualFold(g.cfg.Defaults.SafeStateOnError, "on") {
+			safeOutput = true
+		}
+
+		writeFBS(w, safeOutput)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":    "ok",
-		"connected": true,
-		"tool":      tool.InterlockName,
-		"command":   onOff(on),
-		"relay":     onOff(on),
-		"state":     onOff(on),
-		"output":    on,
-		"ison":      on,
-	})
+	writeFBS(w, on)
 }
 
 func (g *Gateway) getShellyStatus(tool Tool) (ShellySwitchStatus, error) {
