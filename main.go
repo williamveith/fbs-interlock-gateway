@@ -50,6 +50,12 @@ type Gateway struct {
 	client *http.Client
 }
 
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	body   strings.Builder
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	flag.Parse()
@@ -71,6 +77,14 @@ func main() {
 		cfg.Defaults.SafeStateOnError = "off"
 	}
 
+	var (
+		version = "dev"
+		commit  = "unknown"
+		date    = "unknown"
+	)
+
+	log.Printf("fbs-interlock-gateway version=%s commit=%s date=%s", version, commit, date)
+
 	g := &Gateway{
 		cfg: cfg,
 		client: &http.Client{
@@ -84,8 +98,6 @@ func main() {
 	var wg sync.WaitGroup
 
 	for _, tool := range cfg.Tools {
-		tool := tool
-
 		if !tool.Enabled {
 			log.Printf("tool=%s port=%d disabled; skipping", tool.InterlockName, tool.Port)
 			continue
@@ -182,7 +194,7 @@ func (g *Gateway) handleFBSRequest(w http.ResponseWriter, r *http.Request, tool 
 	query := strings.ToLower(r.URL.RawQuery)
 	full := path + "?" + query
 
-	log.Printf("tool=%s fbs_request method=%s path=%s query=%s remote=%s", tool.InterlockName, r.Method, r.URL.Path, r.URL.RawQuery, r.RemoteAddr)
+	logFBSRequest(tool, r)
 
 	switch {
 	case strings.Contains(full, "status"):
@@ -196,7 +208,7 @@ func (g *Gateway) handleFBSRequest(w http.ResponseWriter, r *http.Request, tool 
 
 	default:
 		// Return a controlled response instead of crashing/erroring hard.
-		writeJSON(w, http.StatusNotFound, map[string]any{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"status": "unknown_request",
 			"tool":   tool.InterlockName,
 			"path":   r.URL.Path,
@@ -351,12 +363,71 @@ func writeJSON(w http.ResponseWriter, code int, payload map[string]any) {
 	}
 }
 
+func (rr *responseRecorder) WriteHeader(code int) {
+	rr.status = code
+	rr.ResponseWriter.WriteHeader(code)
+}
+
+func (rr *responseRecorder) Write(data []byte) (int, error) {
+	rr.body.Write(data)
+	return rr.ResponseWriter.Write(data)
+}
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("http_request method=%s path=%s remote=%s duration=%s", r.Method, r.URL.String(), r.RemoteAddr, time.Since(start))
+
+		rr := &responseRecorder{
+			ResponseWriter: w,
+			status:         http.StatusOK,
+		}
+
+		next.ServeHTTP(rr, r)
+
+		responseBody := rr.body.String()
+		if len(responseBody) > 2048 {
+			responseBody = responseBody[:2048] + "...[truncated]"
+		}
+
+		log.Printf(
+			"FBS_OUT method=%s url=%s remote=%s status=%d duration=%s body=%q",
+			r.Method,
+			r.URL.String(),
+			r.RemoteAddr,
+			rr.status,
+			time.Since(start),
+			responseBody,
+		)
 	})
+}
+
+func logFBSRequest(tool Tool, r *http.Request) {
+	body := ""
+
+	if r.Body != nil {
+		data, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+		if err == nil {
+			body = string(data)
+		}
+
+		// Put body back so handlers can still read it later if needed.
+		r.Body = io.NopCloser(strings.NewReader(body))
+	}
+
+	log.Printf(
+		"FBS_IN tool=%s method=%s url=%s proto=%s host=%s remote=%s user_agent=%q content_type=%q accept=%q auth_present=%t body=%q",
+		tool.InterlockName,
+		r.Method,
+		r.URL.String(),
+		r.Proto,
+		r.Host,
+		r.RemoteAddr,
+		r.UserAgent(),
+		r.Header.Get("Content-Type"),
+		r.Header.Get("Accept"),
+		r.Header.Get("Authorization") != "",
+		body,
+	)
 }
 
 func recoverMiddleware(next http.Handler) http.Handler {
