@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -87,10 +87,19 @@ func writeFBS(w http.ResponseWriter, state bool) {
 }
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
-	flag.Parse()
+	// Get the absolute path of the executing binary
+	exePath, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
 
-	cfg, err := loadConfig(*configPath)
+	// Get the directory name of that path
+	dir := filepath.Dir(exePath)
+
+	// Securely stitch the directory and filename together
+	filePath := filepath.Join(dir, "config.yaml")
+
+	cfg, err := loadConfig(filePath)
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
