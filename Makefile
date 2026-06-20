@@ -44,7 +44,7 @@ build-linux-amd64: fmt
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(LINUX_DIR)/$(APP)-linux-amd64" .
+		-o "$(LINUX_DIR)/$(APP)" .
 
 clean:
 	rm -rf "$(BUILD_DIR)"
