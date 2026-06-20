@@ -1,0 +1,14 @@
+bind: "0.0.0.0"
+
+defaults:
+  timeout_ms: 800
+  safe_state_on_error: "off"
+
+tools:
+  - interlock_name: ""
+    ip: ""
+    port: 
+    switch_id: 
+    username: null
+    password: null
+    enabled: true

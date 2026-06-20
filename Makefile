@@ -1,8 +1,4 @@
 APP=fbs-interlock-gateway
-PI_USER=wev222
-PI_HOST=fbs-interlock-gateway.local
-PI_DIR=/opt/fbs-interlock-ping raspberrypi.localgateway
-
 SERVICE_DIR := services
 BUILD_DIR := build
 MAC_DIR := $(BUILD_DIR)/darwin
@@ -30,7 +26,7 @@ build-mac: fmt
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(MAC_DIR)/$(APP)-darwin-arm64" .
+		-o "$(MAC_DIR)/$(APP)" .
 
 build-pi: fmt
 	mkdir -p "$(LINUX_DIR)"
@@ -39,25 +35,16 @@ build-pi: fmt
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(LINUX_DIR)/$(APP)-linux-arm64" .
+		-o "$(LINUX_DIR)/$(APP)" .
 
-deploy: build-pi
-	scp "$(LINUX_DIR)/$(APP)-linux-arm64" $(PI_USER)@$(PI_HOST):/home/$(PI_USER)/$(APP)
-	scp "$(LINUX_DIR)/config.yaml" $(PI_USER)@$(PI_HOST):/home/$(PI_USER)/config.yaml
-	ssh $(PI_USER)@$(PI_HOST) '\
-		sudo mkdir -p $(PI_DIR) && \
-		sudo mv /home/$(PI_USER)/$(APP) $(PI_DIR)/$(APP) && \
-		sudo mv /home/$(PI_USER)/config.yaml $(PI_DIR)/config.yaml && \
-		sudo chown -R $(PI_USER):$(PI_USER) $(PI_DIR) && \
-		chmod +x $(PI_DIR)/$(APP) && \
-		sudo systemctl restart fbs-interlock-gateway.service \
-	'
-
-logs:
-	ssh $(PI_USER)@$(PI_HOST) 'journalctl -u fbs-interlock-gateway.service -f'
-
-status:
-	ssh $(PI_USER)@$(PI_HOST) 'systemctl status fbs-interlock-gateway.service'
+build-linux-amd64: fmt
+	mkdir -p "$(LINUX_DIR)"
+	cp "$(CONFIGS)" "$(LINUX_DIR)/"
+	if [ -d "$(SERVICE_DIR)" ]; then cp -R "$(SERVICE_DIR)" "$(LINUX_DIR)/"; fi
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+		-trimpath \
+		-ldflags="$(LDFLAGS)" \
+		-o "$(LINUX_DIR)/$(APP)-linux-amd64" .
 
 clean:
 	rm -rf "$(BUILD_DIR)"
