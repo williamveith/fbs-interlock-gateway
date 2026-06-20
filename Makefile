@@ -7,7 +7,7 @@ LINUX_DIR := $(BUILD_DIR)/linux
 CONFIGS := config.yaml
 
 INSTALL_DIR ?= /opt/$(APP)
-SERVICE_USER ?= wev222
+SERVICE_USER ?= fbs-gateway
 SERVICE_GROUP ?= $(SERVICE_USER)
 SERVICE_TEMPLATE := $(SERVICE_DIR)/app.service.in
 SERVICE_OUT := $(LINUX_DIR)/$(SERVICE_DIR)/$(APP).service
