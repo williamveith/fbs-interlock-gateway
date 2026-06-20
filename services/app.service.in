@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=wev222
-Group=wev222
-WorkingDirectory=/opt/fbs-interlock-gateway
-ExecStart=/opt/fbs-interlock-gateway/fbs-interlock-gateway -config /opt/fbs-interlock-gateway/config.yaml
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@INSTALL_DIR@
+ExecStart=@INSTALL_DIR@/@APP@ -config @INSTALL_DIR@/config.yaml
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
