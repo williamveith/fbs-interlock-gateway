@@ -9,15 +9,15 @@ Real deployment configuration must stay out of Git. Do not commit `config.yaml`.
 ## System architecture
 
 ```text
-+------------+        HTTP         +-------------------------+        HTTP RPC        +----------------------+
-|            |  /status /on /off   |                         |  Switch.GetStatus     |                      |
++------------+        HTTP         +-------------------------+       HTTP RPC        +----------------------+
+|            |  /status /on /off   |                         |   Switch.GetStatus    |                      |
 | FBS Server | <-----------------> |  fbs-interlock-gateway  | <-------------------> | Network Interlock    |
-|            |                     |                         |  Switch.Set           | Relay / Control Box  |
-+------------+                     +-------------------------+                     +----------------------+
-                                                                                        |
-                                                                                        v
-                                                                                Tool enable / monitor
-                                                                                circuit changes state
+|            |                     |                         |      Switch.Set       | Relay / Control Box  |
++------------+                     +-------------------------+                       +----------------------+
+                                                                                                |
+                                                                                                v
+                                                                                      Tool enable / monitor
+                                                                                      circuit changes state
 ```
 
 ## What this service does
@@ -77,7 +77,7 @@ or:
 {"Success":1,"State":0}
 ```
 
-`State: 1` means the interlock output is on.  
+`State: 1` means the interlock output is on.
 `State: 0` means the interlock output is off.
 
 ### 2. Gateway → Network Interlock
@@ -112,7 +112,13 @@ FBS event
 
 ## Configuration
 
-The service loads `config.yaml` from the same directory as the executable.
+The service loads `config.yaml` from the path provided with the `-config` flag.
+
+In the systemd deployment, the service starts with:
+
+```text
+-config /opt/fbs-interlock-gateway/config.yaml
+```
 
 `config.yaml` is intentionally not tracked by Git because it contains deployment-specific information such as interlock hostnames, addresses, ports, and future credentials.
 
@@ -147,31 +153,79 @@ tools:
 
 ## Config fields
 
-| Field | Purpose |
-|---|---|
-| `bind` | Address the gateway listens on. Use `0.0.0.0` to listen on all interfaces. |
-| `defaults.timeout_ms` | HTTP timeout for interlock requests. |
+| Field                          | Purpose                                                                       |
+| ------------------------------ | ----------------------------------------------------------------------------- |
+| `bind`                         | Address the gateway listens on. Use `0.0.0.0` to listen on all interfaces.    |
+| `defaults.timeout_ms`          | HTTP timeout for interlock requests.                                          |
 | `defaults.safe_state_on_error` | State reported back to FBS if the interlock cannot be reached. Usually `off`. |
-| `tools[].interlock_name` | Human-readable tool/interlock name used in logs. |
-| `tools[].ip` | Hostname or IP address of the network interlock. Keep real values out of Git. |
-| `tools[].port` | Gateway listener port for that FBS tool/interlock. |
-| `tools[].switch_id` | Interlock switch/relay ID. For Shelly 1 Mini Gen3 this is usually `0`. |
-| `tools[].username` | Reserved for future authenticated interlocks. |
-| `tools[].password` | Reserved for future authenticated interlocks. Do not commit real passwords. |
-| `tools[].enabled` | Whether this gateway listener should start. |
+| `tools[].interlock_name`       | Human-readable tool/interlock name used in logs.                              |
+| `tools[].ip`                   | Hostname or IP address of the network interlock. Keep real values out of Git. |
+| `tools[].port`                 | Gateway listener port for that FBS tool/interlock.                            |
+| `tools[].switch_id`            | Interlock switch/relay ID. For Shelly 1 Mini Gen3 this is usually `0`.        |
+| `tools[].username`             | Reserved for future authenticated interlocks.                                 |
+| `tools[].password`             | Reserved for future authenticated interlocks. Do not commit real passwords.   |
+| `tools[].enabled`              | Whether this gateway listener should start.                                   |
+
+## Service file template
+
+The systemd service file is generated from a template instead of being manually duplicated.
+
+The committed template lives at:
+
+```text
+services/app.service.in
+```
+
+The Makefile uses the `APP` value to generate the real service file during Linux builds.
+
+Current app name:
+
+```make
+APP=fbs-interlock-gateway
+```
+
+During a Linux build, the generated service file is written to:
+
+```text
+build/linux/services/fbs-interlock-gateway.service
+```
+
+This keeps the systemd service name, binary path, working directory, and `ExecStart` command tied to the Makefile app name.
+
+The generated service uses this deployment layout:
+
+```text
+/opt/fbs-interlock-gateway/
+  fbs-interlock-gateway
+  config.yaml
+```
+
+The generated systemd service starts the gateway with:
+
+```text
+/opt/fbs-interlock-gateway/fbs-interlock-gateway -config /opt/fbs-interlock-gateway/config.yaml
+```
+
+If the `APP` value changes in the Makefile, the generated service file changes with it.
 
 ## Building
 
-Build for the local machine:
+Build for macOS Apple Silicon:
 
 ```bash
 make build-mac
 ```
 
-Build for Linux:
+Build for Linux ARM64:
 
 ```bash
-make build-linux
+make build-pi
+```
+
+Build for Linux AMD64:
+
+```bash
+make build-linux-amd64
 ```
 
 Format the code:
@@ -187,6 +241,32 @@ make clean
 ```
 
 Use the exact targets available in the included `Makefile`.
+
+## Build output
+
+Linux builds place the binary and generated service file under:
+
+```text
+build/linux/
+```
+
+Expected Linux AMD64 or ARM64 output:
+
+```text
+build/linux/
+  fbs-interlock-gateway
+  config.yaml
+  services/
+    fbs-interlock-gateway.service
+```
+
+The service file in `build/linux/services/` is generated from:
+
+```text
+services/app.service.in
+```
+
+Do not manually edit the generated service file. Edit the template or Makefile variables instead.
 
 ## Local testing
 
@@ -229,15 +309,15 @@ sudo mkdir -p /opt/fbs-interlock-gateway
 Copy the binary and local config:
 
 ```bash
-sudo cp <built-binary> /opt/fbs-interlock-gateway/fbs-interlock-gateway
+sudo cp build/linux/fbs-interlock-gateway /opt/fbs-interlock-gateway/fbs-interlock-gateway
 sudo cp config.yaml /opt/fbs-interlock-gateway/config.yaml
 sudo chmod +x /opt/fbs-interlock-gateway/fbs-interlock-gateway
 ```
 
-Install the systemd service:
+Install the generated systemd service:
 
 ```bash
-sudo cp fbs-interlock-gateway.service /etc/systemd/system/fbs-interlock-gateway.service
+sudo cp build/linux/services/fbs-interlock-gateway.service /etc/systemd/system/fbs-interlock-gateway.service
 sudo systemctl daemon-reload
 sudo systemctl enable fbs-interlock-gateway.service
 sudo systemctl restart fbs-interlock-gateway.service
@@ -254,7 +334,7 @@ journalctl -u fbs-interlock-gateway.service -f
 
 On startup, the gateway:
 
-1. Loads `config.yaml` from the executable directory.
+1. Loads `config.yaml` from the path provided with `-config`.
 2. Applies default values when fields are omitted.
 3. Starts one HTTP server per enabled tool.
 4. Maps each gateway port to one configured interlock.
@@ -294,24 +374,27 @@ journalctl -u fbs-interlock-gateway.service -f
 config.yaml
 ```
 
-Only commit safe examples:
+Only commit safe examples and templates:
 
 ```text
 config-sample.yaml
 README.md
 Makefile
-fbs-interlock-gateway.service
+services/app.service.in
 main.go
 ```
+
+Do not commit generated deployment files unless there is a specific reason to do so.
 
 Do not commit real hostnames, IP addresses, usernames, passwords, internal network names, or deployment-specific interlock mappings.
 
 ## Notes
 
-- One gateway process can manage multiple interlocks.
-- Each interlock gets its own gateway listener port.
-- FBS communicates only with the gateway.
-- The gateway communicates with each interlock using HTTP RPC.
-- Real deployment mappings live only in local `config.yaml`.
-- The current implementation uses unauthenticated Shelly-style HTTP RPC.
-- The current implementation loads config from the executable directory.
+* One gateway process can manage multiple interlocks.
+* Each interlock gets its own gateway listener port.
+* FBS communicates only with the gateway.
+* The gateway communicates with each interlock using HTTP RPC.
+* Real deployment mappings live only in local `config.yaml`.
+* The current implementation uses unauthenticated Shelly-style HTTP RPC.
+* The systemd service file is generated from `services/app.service.in`.
+* The generated service name and executable path are based on the Makefile `APP` value.
