@@ -108,6 +108,7 @@ func writeFBS(w http.ResponseWriter, state bool) {
 func main() {
 	configPath := flag.String("config", "", "path to config.yaml")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	adminAddr := flag.String("admin", "127.0.0.1:18090", "admin UI listen address; empty disables admin UI")
 	flag.Parse()
 
 	if *showVersion {
@@ -169,7 +170,12 @@ func main() {
 	defer stop()
 
 	restartRequested := make(chan struct{}, 1)
-	go g.runAdminServer(ctx, "127.0.0.1:8090", restartRequested)
+
+	if *adminAddr != "" {
+		go g.runAdminServer(ctx, *adminAddr, restartRequested)
+	} else {
+		log.Printf("admin UI disabled")
+	}
 
 	var wg sync.WaitGroup
 
