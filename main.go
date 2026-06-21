@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -24,24 +26,24 @@ import (
 )
 
 type Config struct {
-	Bind     string   `yaml:"bind"`
-	Defaults Defaults `yaml:"defaults"`
-	Tools    []Tool   `yaml:"tools"`
+	Bind     string   `yaml:"bind" json:"bind"`
+	Defaults Defaults `yaml:"defaults" json:"defaults"`
+	Tools    []Tool   `yaml:"tools" json:"tools"`
 }
 
 type Defaults struct {
-	TimeoutMS        int    `yaml:"timeout_ms"`
-	SafeStateOnError string `yaml:"safe_state_on_error"`
+	TimeoutMS        int    `yaml:"timeout_ms" json:"timeout_ms"`
+	SafeStateOnError string `yaml:"safe_state_on_error" json:"safe_state_on_error"`
 }
 
 type Tool struct {
-	InterlockName string  `yaml:"interlock_name"`
-	IP            string  `yaml:"ip"`
-	Port          int     `yaml:"port"`
-	SwitchID      int     `yaml:"switch_id"`
-	Username      *string `yaml:"username"`
-	Password      *string `yaml:"password"`
-	Enabled       bool    `yaml:"enabled"`
+	InterlockName string  `yaml:"interlock_name" json:"interlock_name"`
+	IP            string  `yaml:"ip" json:"ip"`
+	Port          int     `yaml:"port" json:"port"`
+	SwitchID      int     `yaml:"switch_id" json:"switch_id"`
+	Username      *string `yaml:"username" json:"username"`
+	Password      *string `yaml:"password" json:"password"`
+	Enabled       bool    `yaml:"enabled" json:"enabled"`
 }
 
 type ShellySwitchStatus struct {
@@ -50,7 +52,9 @@ type ShellySwitchStatus struct {
 }
 
 type Gateway struct {
+	mu         sync.RWMutex
 	cfg        Config
+	configPath string
 	client     *http.Client
 	safeOutput bool
 }
@@ -60,6 +64,20 @@ type responseRecorder struct {
 	status int
 	body   strings.Builder
 }
+
+type AdminToolStatus struct {
+	InterlockName string `json:"interlock_name"`
+	IP            string `json:"ip"`
+	Port          int    `json:"port"`
+	SwitchID      int    `json:"switch_id"`
+	Enabled       bool   `json:"enabled"`
+	Connected     bool   `json:"connected"`
+	Output        bool   `json:"output"`
+	Error         string `json:"error,omitempty"`
+}
+
+//go:embed web
+var embeddedWeb embed.FS
 
 var (
 	version = "dev"
@@ -134,7 +152,8 @@ func main() {
 	log.Printf("fbs-interlock-gateway version=%s commit=%s date=%s config=%s", version, commit, date, *configPath)
 
 	g := &Gateway{
-		cfg: cfg,
+		cfg:        cfg,
+		configPath: *configPath,
 		client: &http.Client{
 			Timeout: time.Duration(cfg.Defaults.TimeoutMS) * time.Millisecond,
 			Transport: &http.Transport{
@@ -148,6 +167,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	restartRequested := make(chan struct{}, 1)
+	go g.runAdminServer(ctx, "127.0.0.1:8090", restartRequested)
 
 	var wg sync.WaitGroup
 
@@ -171,8 +193,14 @@ func main() {
 
 	log.Printf("fbs-interlock-gateway started with %d tool(s)", len(cfg.Tools))
 
-	<-ctx.Done()
-	log.Println("shutdown requested")
+	select {
+	case <-ctx.Done():
+		log.Println("shutdown requested")
+	case <-restartRequested:
+		log.Println("restart requested from admin UI")
+		stop()
+	}
+
 	wg.Wait()
 	log.Println("shutdown complete")
 }
@@ -192,6 +220,48 @@ func loadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+func writeConfigAtomic(path string, cfg Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+
+	backupPath := path + ".bak"
+	if oldData, err := os.ReadFile(path); err == nil {
+		_ = os.WriteFile(backupPath, oldData, 0644)
+	}
+
+	tmpPath := path + ".tmp"
+
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, path)
+}
+
+func validateConfig(cfg Config) error {
+	if cfg.Bind == "" {
+		cfg.Bind = "0.0.0.0"
+	}
+
+	seenPorts := map[int]string{}
+
+	for _, tool := range cfg.Tools {
+		if err := validateTool(tool); err != nil {
+			return err
+		}
+
+		if existing, ok := seenPorts[tool.Port]; ok {
+			return fmt.Errorf("duplicate port %d used by %s and %s", tool.Port, existing, tool.InterlockName)
+		}
+
+		seenPorts[tool.Port] = tool.InterlockName
+	}
+
+	return nil
+}
+
 func validateTool(t Tool) error {
 	if t.InterlockName == "" {
 		return fmt.Errorf("missing interlock_name")
@@ -206,6 +276,144 @@ func validateTool(t Tool) error {
 		return fmt.Errorf("invalid switch_id %d", t.SwitchID)
 	}
 	return nil
+}
+
+func (g *Gateway) runAdminServer(ctx context.Context, addr string, restartRequested chan<- struct{}) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/config", g.handleAdminConfig)
+	mux.HandleFunc("/api/status", g.handleAdminStatus)
+	mux.HandleFunc("/api/restart", func(w http.ResponseWriter, r *http.Request) {
+		g.handleAdminRestart(w, r, restartRequested)
+	})
+
+	webRoot, err := fs.Sub(embeddedWeb, "web")
+	if err != nil {
+		log.Fatalf("failed to load embedded web files: %v", err)
+	}
+
+	fileServer := http.FileServer(http.FS(webRoot))
+	mux.Handle("/", fileServer)
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 2 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	log.Printf("admin UI listening on %s", addr)
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("admin server error: %v", err)
+	}
+}
+
+func (g *Gateway) handleAdminConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		g.mu.RLock()
+		cfg := g.cfg
+		g.mu.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cfg)
+
+	case http.MethodPut:
+		var newCfg Config
+
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&newCfg); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := validateConfig(newCfg); err != nil {
+			http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := writeConfigAtomic(g.configPath, newCfg); err != nil {
+			http.Error(w, "failed to write config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		g.mu.Lock()
+		g.cfg = newCfg
+		g.safeOutput = strings.EqualFold(newCfg.Defaults.SafeStateOnError, "on")
+		g.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"saved":true,"restart_required":true}`))
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (g *Gateway) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
+	g.mu.RLock()
+	tools := append([]Tool(nil), g.cfg.Tools...)
+	g.mu.RUnlock()
+
+	results := make([]AdminToolStatus, 0, len(tools))
+
+	for _, tool := range tools {
+		item := AdminToolStatus{
+			InterlockName: tool.InterlockName,
+			IP:            tool.IP,
+			Port:          tool.Port,
+			SwitchID:      tool.SwitchID,
+			Enabled:       tool.Enabled,
+		}
+
+		if !tool.Enabled {
+			results = append(results, item)
+			continue
+		}
+
+		status, err := g.getShellyStatus(tool)
+		if err != nil {
+			item.Connected = false
+			item.Output = g.safeOutput
+			item.Error = err.Error()
+		} else {
+			item.Connected = true
+			item.Output = status.Output
+		}
+
+		results = append(results, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(results)
+}
+
+func (g *Gateway) handleAdminRestart(w http.ResponseWriter, r *http.Request, restartRequested chan<- struct{}) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"restart_requested":true}`))
+
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+
+		select {
+		case restartRequested <- struct{}{}:
+		default:
+		}
+	}()
 }
 
 func (g *Gateway) runToolServer(ctx context.Context, tool Tool) {
