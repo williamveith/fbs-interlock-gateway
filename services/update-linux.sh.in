@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP="@APP@"
+INSTALL_DIR="@INSTALL_DIR@"
+SERVICE_NAME="${APP}.service"
+REPO="williamveith/fbs-interlock-gateway"
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  if command -v pkexec >/dev/null 2>&1; then
+    exec pkexec env \
+      DISPLAY="${DISPLAY:-}" \
+      XAUTHORITY="${XAUTHORITY:-}" \
+      bash "$0" "$@"
+  else
+    echo "Administrator privileges are required."
+    echo "Run this script with:"
+    echo "  sudo ${INSTALL_DIR}/update.sh"
+    exit 1
+  fi
+fi
+
+command -v curl >/dev/null 2>&1 || {
+  echo "ERROR: curl is required."
+  exit 1
+}
+
+command -v sha256sum >/dev/null 2>&1 || {
+  echo "ERROR: sha256sum is required."
+  exit 1
+}
+
+case "$(uname -m)" in
+  x86_64|amd64)
+    ARCH="amd64"
+    ;;
+  aarch64|arm64)
+    ARCH="arm64"
+    ;;
+  *)
+    echo "ERROR: Unsupported architecture: $(uname -m)"
+    exit 1
+    ;;
+esac
+
+ASSET="${APP}-linux-${ARCH}"
+BASE_URL="https://github.com/${REPO}/releases/latest/download"
+BIN_URL="${BASE_URL}/${ASSET}"
+SHA_URL="${BASE_URL}/${ASSET}.sha256"
+
+CURRENT_BIN="${INSTALL_DIR}/${APP}"
+
+if [[ ! -d "$INSTALL_DIR" ]]; then
+  echo "ERROR: Install directory does not exist:"
+  echo "  $INSTALL_DIR"
+  echo "Run install.sh first."
+  exit 1
+fi
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+echo "Checking latest release for ${APP}..."
+echo "Architecture: linux-${ARCH}"
+echo
+
+echo "Downloading binary..."
+curl -fL --retry 3 --connect-timeout 10 \
+  -o "${TMP_DIR}/${ASSET}" \
+  "$BIN_URL"
+
+echo "Downloading checksum..."
+curl -fL --retry 3 --connect-timeout 10 \
+  -o "${TMP_DIR}/${ASSET}.sha256" \
+  "$SHA_URL"
+
+echo "Verifying checksum..."
+(
+  cd "$TMP_DIR"
+  sha256sum -c "${ASSET}.sha256"
+)
+
+chmod 0755 "${TMP_DIR}/${ASSET}"
+
+if [[ -f "$CURRENT_BIN" ]] && cmp -s "${TMP_DIR}/${ASSET}" "$CURRENT_BIN"; then
+  echo "Already running the latest binary."
+  exit 0
+fi
+
+BACKUP=""
+if [[ -f "$CURRENT_BIN" ]]; then
+  BACKUP="${INSTALL_DIR}/${APP}.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+  echo "Backing up current binary:"
+  echo "  $BACKUP"
+  cp -a "$CURRENT_BIN" "$BACKUP"
+fi
+
+WAS_ACTIVE=0
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+  WAS_ACTIVE=1
+fi
+
+echo "Stopping service..."
+systemctl stop "$SERVICE_NAME" || true
+
+echo "Installing latest binary..."
+install -o root -g root -m 0755 \
+  "${TMP_DIR}/${ASSET}" \
+  "$CURRENT_BIN"
+
+if [[ "$WAS_ACTIVE" -eq 1 ]]; then
+  echo "Starting service..."
+  if systemctl start "$SERVICE_NAME"; then
+    echo "Update complete."
+    systemctl --no-pager --full status "$SERVICE_NAME" || true
+  else
+    echo "ERROR: Service failed to start after update."
+
+    if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
+      echo "Rolling back to previous binary..."
+      install -o root -g root -m 0755 "$BACKUP" "$CURRENT_BIN"
+      systemctl start "$SERVICE_NAME" || true
+    fi
+
+    exit 1
+  fi
+else
+  echo "Update complete. Service was not active before update, so it was not restarted."
+fi

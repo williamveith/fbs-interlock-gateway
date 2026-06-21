@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -85,21 +86,28 @@ func writeFBS(w http.ResponseWriter, state bool) {
 }
 
 func main() {
-	// Get the absolute path of the executing binary
-	exePath, err := os.Executable()
-	if err != nil {
-		panic(err)
+	configPath := flag.String("config", "", "path to config.yaml")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("fbs-interlock-gateway version=%s commit=%s date=%s\n", version, commit, date)
+		return
 	}
 
-	// Get the directory name of that path
-	dir := filepath.Dir(exePath)
+	if *configPath == "" {
+		exePath, err := os.Executable()
+		if err != nil {
+			log.Fatalf("failed to get executable path: %v", err)
+		}
 
-	// Securely stitch the directory and filename together
-	filePath := filepath.Join(dir, "config.yaml")
+		dir := filepath.Dir(exePath)
+		*configPath = filepath.Join(dir, "config.yaml")
+	}
 
-	cfg, err := loadConfig(filePath)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
 
 	if cfg.Bind == "" {
@@ -114,7 +122,7 @@ func main() {
 		cfg.Defaults.SafeStateOnError = "off"
 	}
 
-	log.Printf("fbs-interlock-gateway version=%s commit=%s date=%s", version, commit, date)
+	log.Printf("fbs-interlock-gateway version=%s commit=%s date=%s config=%s", version, commit, date, *configPath)
 
 	g := &Gateway{
 		cfg: cfg,

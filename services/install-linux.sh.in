@@ -12,6 +12,12 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="${SOURCE_DIR}/${APP}"
 CONFIG_SRC="${SOURCE_DIR}/config.yaml"
 SERVICE_SRC="${SOURCE_DIR}/${SERVICE_NAME}"
+UPDATE_SRC="${SOURCE_DIR}/update.sh"
+
+UPDATE_SERVICE_SRC="${SOURCE_DIR}/${APP}-update.service"
+UPDATE_TIMER_SRC="${SOURCE_DIR}/${APP}-update.timer"
+UPDATE_SERVICE_NAME="${APP}-update.service"
+UPDATE_TIMER_NAME="${APP}-update.timer"
 
 echo "Installing ${APP} from:"
 echo "  ${SOURCE_DIR}"
@@ -83,11 +89,37 @@ install -o root -g root -m 0644 \
   "$SERVICE_SRC" \
   "/etc/systemd/system/$SERVICE_NAME"
 
+if [[ -f "$UPDATE_SERVICE_SRC" ]]; then
+  echo "Installing auto-update service..."
+  install -o root -g root -m 0644 \
+    "$UPDATE_SERVICE_SRC" \
+    "/etc/systemd/system/$UPDATE_SERVICE_NAME"
+fi
+
+if [[ -f "$UPDATE_TIMER_SRC" ]]; then
+  echo "Installing auto-update timer..."
+  install -o root -g root -m 0644 \
+    "$UPDATE_TIMER_SRC" \
+    "/etc/systemd/system/$UPDATE_TIMER_NAME"
+fi
+
+if [[ -f "$UPDATE_SRC" ]]; then
+  echo "Installing update.sh..."
+  install -o root -g root -m 0755 \
+    "$UPDATE_SRC" \
+    "$INSTALL_DIR/update.sh"
+fi
+
 echo "Reloading systemd..."
 systemctl daemon-reload
 
 echo "Enabling service..."
 systemctl enable "$SERVICE_NAME"
+
+if [[ -f "/etc/systemd/system/$UPDATE_TIMER_NAME" ]]; then
+  echo "Enabling auto-update timer..."
+  systemctl enable --now "$UPDATE_TIMER_NAME"
+fi
 
 echo "Restarting service..."
 systemctl restart "$SERVICE_NAME"
