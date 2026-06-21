@@ -90,6 +90,29 @@ $(UPDATE_TIMER_OUT): $(UPDATE_TIMER_TEMPLATE) Makefile
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(UPDATE_TIMER_TEMPLATE)" > "$@"
 
+init-config:
+	@if [ -f "$(CONFIGS)" ]; then \
+		echo "$(CONFIGS) already exists; not overwriting."; \
+	else \
+		echo "Creating $(CONFIGS)"; \
+		printf '%s\n' \
+			'bind: 0.0.0.0' \
+			'' \
+			'defaults:' \
+			'  timeout_ms: 800' \
+			'  safe_state_on_error: "off"' \
+			'' \
+			'tools:' \
+			'  - interlock_name:' \
+			'    ip:' \
+			'    port:' \
+			'    switch_id:' \
+			'    username:' \
+			'    password:' \
+			'    enabled:' \
+			> "$(CONFIGS)"; \
+	fi
+
 build-mac: fmt
 	mkdir -p "$(MAC_DIR)"
 	cp "$(CONFIGS)" "$(MAC_DIR)/"
