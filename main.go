@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -46,8 +50,9 @@ type ShellySwitchStatus struct {
 }
 
 type Gateway struct {
-	cfg    Config
-	client *http.Client
+	cfg        Config
+	client     *http.Client
+	safeOutput bool
 }
 
 type responseRecorder struct {
@@ -62,46 +67,56 @@ var (
 	date    = "unknown"
 )
 
-func boolState(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
-}
-
-type FBSResponse struct {
-	Success int `json:"Success"`
-	State   int `json:"State"`
-}
+var (
+	fbsOn  = []byte(`{"Success":1,"State":1}`)
+	fbsOff = []byte(`{"Success":1,"State":0}`)
+)
 
 func writeFBS(w http.ResponseWriter, state bool) {
-	body := fmt.Sprintf(`{"Success":1,"State":%d}`, boolState(state))
+	body := fbsOff
+	if state {
+		body = fbsOn
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 
-	if _, err := w.Write([]byte(body)); err != nil {
+	if _, err := w.Write(body); err != nil {
 		log.Printf("failed to write FBS response: %v", err)
 	}
 }
 
 func main() {
-	// Get the absolute path of the executing binary
-	exePath, err := os.Executable()
-	if err != nil {
-		panic(err)
+	configPath := flag.String("config", "", "path to config.yaml")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("fbs-interlock-gateway version=%s commit=%s date=%s\n", version, commit, date)
+		return
 	}
 
-	// Get the directory name of that path
-	dir := filepath.Dir(exePath)
+	if *configPath == "" {
+		exePath, err := os.Executable()
+		if err != nil {
+			log.Fatalf("failed to get executable path: %v", err)
+		}
 
-	// Securely stitch the directory and filename together
-	filePath := filepath.Join(dir, "config.yaml")
+		dir := filepath.Dir(exePath)
+		*configPath = filepath.Join(dir, "config.yaml")
+	}
 
-	cfg, err := loadConfig(filePath)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		log.Fatalf("failed to load config %q: %v", *configPath, err)
+	}
+
+	for _, tool := range cfg.Tools {
+		if tool.Enabled {
+			killPort(strconv.Itoa(tool.Port))
+		}
+
 	}
 
 	if cfg.Bind == "" {
@@ -116,13 +131,19 @@ func main() {
 		cfg.Defaults.SafeStateOnError = "off"
 	}
 
-	log.Printf("fbs-interlock-gateway version=%s commit=%s date=%s", version, commit, date)
+	log.Printf("fbs-interlock-gateway version=%s commit=%s date=%s config=%s", version, commit, date, *configPath)
 
 	g := &Gateway{
 		cfg: cfg,
 		client: &http.Client{
 			Timeout: time.Duration(cfg.Defaults.TimeoutMS) * time.Millisecond,
+			Transport: &http.Transport{
+				MaxIdleConns:        256,
+				MaxIdleConnsPerHost: 8,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
+		safeOutput: strings.EqualFold(cfg.Defaults.SafeStateOnError, "on"),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -198,7 +219,7 @@ func (g *Gateway) runToolServer(ctx context.Context, tool Tool) {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           recoverMiddleware(loggingMiddleware(mux)),
+		Handler:           recoverMiddleware(loggingMiddleware(mux), g.safeOutput),
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       3 * time.Second,
 		WriteTimeout:      3 * time.Second,
@@ -267,13 +288,7 @@ func (g *Gateway) handleStatus(w http.ResponseWriter, tool Tool) {
 	status, err := g.getShellyStatus(tool)
 	if err != nil {
 		log.Printf("tool=%s shelly_status_error=%v", tool.InterlockName, err)
-
-		safeOutput := false
-		if strings.EqualFold(g.cfg.Defaults.SafeStateOnError, "on") {
-			safeOutput = true
-		}
-
-		writeFBS(w, safeOutput)
+		writeFBS(w, g.safeOutput)
 		return
 	}
 
@@ -284,13 +299,7 @@ func (g *Gateway) handleSet(w http.ResponseWriter, tool Tool, on bool) {
 	err := g.setShelly(tool, on)
 	if err != nil {
 		log.Printf("tool=%s shelly_set_error command=%s error=%v", tool.InterlockName, onOff(on), err)
-
-		safeOutput := false
-		if strings.EqualFold(g.cfg.Defaults.SafeStateOnError, "on") {
-			safeOutput = true
-		}
-
-		writeFBS(w, safeOutput)
+		writeFBS(w, g.safeOutput)
 		return
 	}
 
@@ -312,13 +321,12 @@ func (g *Gateway) getShellyStatus(tool Tool) (ShellySwitchStatus, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return status, fmt.Errorf("shelly status HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	if err := json.Unmarshal(body, &status); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&status); err != nil {
 		return status, err
 	}
 
@@ -339,12 +347,12 @@ func (g *Gateway) setShelly(tool Tool, on bool) error {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("shelly set HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	return nil
 }
 
@@ -353,15 +361,6 @@ func onOff(v bool) string {
 		return "on"
 	}
 	return "off"
-}
-
-func writeJSON(w http.ResponseWriter, code int, payload map[string]any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("failed to write response: %v", err)
-	}
 }
 
 func (rr *responseRecorder) WriteHeader(code int) {
@@ -405,13 +404,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
 func logFBSRequest(tool Tool, r *http.Request) {
 	body := ""
 
-	if r.Body != nil {
+	if r.Body != nil && r.ContentLength != 0 {
 		data, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 		if err == nil {
 			body = string(data)
 		}
 
-		// Put body back so handlers can still read it later if needed.
 		r.Body = io.NopCloser(strings.NewReader(body))
 	}
 
@@ -431,20 +429,40 @@ func logFBSRequest(tool Tool, r *http.Request) {
 	)
 }
 
-func recoverMiddleware(next http.Handler) http.Handler {
+func recoverMiddleware(next http.Handler, safeOutput bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				log.Printf("panic recovered: %v", recovered)
-
-				writeJSON(w, http.StatusOK, map[string]any{
-					"status":    "error",
-					"connected": false,
-					"error":     fmt.Sprintf("%v", recovered),
-				})
+				writeFBS(w, safeOutput)
 			}
 		}()
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func killPort(port string) {
+
+	cmd := &exec.Cmd{}
+
+	if runtime.GOOS == "windows" {
+		command := fmt.Sprintf("(Get-NetTCPConnection -LocalPort %s).OwningProcess -Force", port)
+		cmd = exec.Command("Stop-Process", "-Id", command)
+	} else {
+		command := fmt.Sprintf("lsof -i tcp:%s | grep LISTEN | awk '{print $2}' | xargs kill -9", port)
+		cmd = exec.Command("bash", "-c", command)
+	}
+
+	var waitStatus syscall.WaitStatus
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+		if exitError, ok := err.(*exec.ExitError); ok {
+			waitStatus = exitError.Sys().(syscall.WaitStatus)
+			fmt.Printf("Error during killing (exit code: %s)\n", fmt.Appendf(nil, "%d", waitStatus.ExitStatus()))
+		}
+	} else {
+		waitStatus = cmd.ProcessState.Sys().(syscall.WaitStatus)
+		fmt.Printf("Port successfully killed (exit code: %s)\n", fmt.Appendf(nil, "%d", waitStatus.ExitStatus()))
+	}
 }

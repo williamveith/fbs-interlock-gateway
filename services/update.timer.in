@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily FBS Interlock Gateway update check
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=@APP@-update.service
+
+[Install]
+WantedBy=timers.target
