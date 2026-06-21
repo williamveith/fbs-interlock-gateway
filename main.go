@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,6 +110,13 @@ func main() {
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("failed to load config %q: %v", *configPath, err)
+	}
+
+	for _, tool := range cfg.Tools {
+		if tool.Enabled {
+			killPort(strconv.Itoa(tool.Port))
+		}
+
 	}
 
 	if cfg.Bind == "" {
@@ -431,4 +440,29 @@ func recoverMiddleware(next http.Handler, safeOutput bool) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func killPort(port string) {
+
+	cmd := &exec.Cmd{}
+
+	if runtime.GOOS == "windows" {
+		command := fmt.Sprintf("(Get-NetTCPConnection -LocalPort %s).OwningProcess -Force", port)
+		cmd = exec.Command("Stop-Process", "-Id", command)
+	} else {
+		command := fmt.Sprintf("lsof -i tcp:%s | grep LISTEN | awk '{print $2}' | xargs kill -9", port)
+		cmd = exec.Command("bash", "-c", command)
+	}
+
+	var waitStatus syscall.WaitStatus
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err.Error())
+		if exitError, ok := err.(*exec.ExitError); ok {
+			waitStatus = exitError.Sys().(syscall.WaitStatus)
+			fmt.Printf("Error during killing (exit code: %s)\n", fmt.Appendf(nil, "%d", waitStatus.ExitStatus()))
+		}
+	} else {
+		waitStatus = cmd.ProcessState.Sys().(syscall.WaitStatus)
+		fmt.Printf("Port successfully killed (exit code: %s)\n", fmt.Appendf(nil, "%d", waitStatus.ExitStatus()))
+	}
 }
