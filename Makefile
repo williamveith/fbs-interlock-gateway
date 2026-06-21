@@ -10,7 +10,9 @@ INSTALL_DIR ?= /opt/$(APP)
 SERVICE_USER ?= fbs-gateway
 SERVICE_GROUP ?= $(SERVICE_USER)
 SERVICE_TEMPLATE := $(SERVICE_DIR)/app.service.in
-SERVICE_OUT := $(LINUX_DIR)/$(SERVICE_DIR)/$(APP).service
+SERVICE_OUT := $(LINUX_DIR)/$(APP).service
+INSTALL_TEMPLATE := $(SERVICE_DIR)/install-linux.sh.in
+INSTALL_OUT := $(LINUX_DIR)/install.sh
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -27,13 +29,23 @@ fmt:
 	go fmt ./...
 
 $(SERVICE_OUT): $(SERVICE_TEMPLATE) Makefile
-	mkdir -p "$(LINUX_DIR)/$(SERVICE_DIR)"
+	mkdir -p "$(LINUX_DIR)"
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
 		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(SERVICE_TEMPLATE)" > "$@"
+
+$(INSTALL_OUT): $(INSTALL_TEMPLATE) Makefile
+	mkdir -p "$(LINUX_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
+		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
+		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
+		"$(INSTALL_TEMPLATE)" > "$@"
+	chmod +x "$@"
 
 build-mac: fmt
 	mkdir -p "$(MAC_DIR)"
@@ -43,7 +55,7 @@ build-mac: fmt
 		-ldflags="$(LDFLAGS)" \
 		-o "$(MAC_DIR)/$(APP)" .
 
-build-pi: fmt $(SERVICE_OUT)
+build-pi: fmt $(SERVICE_OUT) $(INSTALL_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
@@ -51,7 +63,7 @@ build-pi: fmt $(SERVICE_OUT)
 		-ldflags="$(LDFLAGS)" \
 		-o "$(LINUX_DIR)/$(APP)" .
 
-build-linux-amd64: fmt $(SERVICE_OUT)
+build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
