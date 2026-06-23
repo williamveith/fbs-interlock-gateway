@@ -9,22 +9,22 @@ Real deployment configuration must stay out of Git. Do not commit `config.yaml` 
 ## System architecture
 
 ```text
-+------------+        HTTP         +-------------------------+       HTTP RPC        +----------------------+
-|            |  /status /on /off   |                         |   Switch.GetStatus    |                      |
-| FBS Server | <-----------------> |  fbs-interlock-gateway  | <-------------------> | Network Interlock    |
-|            |                     |                         |      Switch.Set       | Relay / Control Box  |
-+------------+                     +-------------------------+                       +----------------------+
-                                                                                                |
-                                                                                                v
-                                                                                      Tool enable / monitor
-                                                                                      circuit changes state
-
-
-                     Local-only admin UI
-                 http://127.0.0.1:18090
-                              |
-                              v
-                  config.yaml editor / status view
++------------+        HTTP         +-----------------------+       HTTP RPC        +---------------------+
+|            |  /status /on /off   |                       |   Switch.GetStatus    |                     |
+| FBS Server | <-----------------> | fbs-interlock-gateway | <-------------------> | Network Interlock   |
+|            |                     |                       |      Switch.Set       | Relay / Control Box |
++------------+                     +-----------------------+                       +---------------------+
+                                                                                              |
+                                                                                              v
+                                                                                    Tool enable / monitor
+                                                                                    circuit changes state
+   +------------------------+ 
+   |  Local-only admin UI   |
+   | http://127.0.0.1:18090 |
+   +------------------------+
+                |
+                v
+config.yaml editor / status view
 ```
 
 ## What this service does
