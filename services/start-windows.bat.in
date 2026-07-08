@@ -1,0 +1,3 @@
+@echo off
+cd /d "@WINDOWS_INSTALL_DIR@"
+start "FBS Interlock Gateway" /min "@APP@.exe"

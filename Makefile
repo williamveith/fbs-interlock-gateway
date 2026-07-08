@@ -3,6 +3,7 @@ SERVICE_DIR := services
 BUILD_DIR := build
 MAC_DIR := $(BUILD_DIR)/darwin
 LINUX_DIR := $(BUILD_DIR)/linux
+WINDOWS_DIR := $(BUILD_DIR)/windows
 
 CONFIGS := config.yaml
 
@@ -25,9 +26,14 @@ UPDATE_TIMER_TEMPLATE := $(SERVICE_DIR)/update.timer.in
 UPDATE_SERVICE_OUT := $(LINUX_DIR)/$(APP)-update.service
 UPDATE_TIMER_OUT := $(LINUX_DIR)/$(APP)-update.timer
 
+WINDOWS_INSTALL_DIR ?= C:/FBS/$(APP)
+START_WINDOWS_TEMPLATE := $(SERVICE_DIR)/start-windows.bat.in
+START_WINDOWS_OUT := $(WINDOWS_DIR)/start.bat
+
 RELEASE_DIR := $(BUILD_DIR)/release
 LINUX_AMD64_ASSET := $(RELEASE_DIR)/$(APP)-linux-amd64
 LINUX_ARM64_ASSET := $(RELEASE_DIR)/$(APP)-linux-arm64
+WINDOWS_AMD64_ASSET := $(RELEASE_DIR)/$(APP)-windows-amd64.exe
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -35,7 +41,7 @@ DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: run fmt build-mac build-linux-arm64 build-linux-amd64 release-linux-amd64 release-linux-arm64 release clean
+.PHONY: run fmt build-mac build-linux-arm64 build-linux-amd64 build-windows-amd64 start-windows release-linux-amd64 release-linux-arm64 release-windows-amd64 release clean
 
 run:
 	go run . -config config.yaml
@@ -90,6 +96,15 @@ $(UPDATE_TIMER_OUT): $(UPDATE_TIMER_TEMPLATE) Makefile
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(UPDATE_TIMER_TEMPLATE)" > "$@"
 
+$(START_WINDOWS_OUT): $(START_WINDOWS_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		"$(START_WINDOWS_TEMPLATE)" > "$@"
+
+start-windows: $(START_WINDOWS_OUT)
+
 init-config:
 	@if [ -f "$(CONFIGS)" ]; then \
 		echo "$(CONFIGS) already exists; not overwriting."; \
@@ -137,6 +152,14 @@ build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERV
 		-ldflags="$(LDFLAGS)" \
 		-o "$(LINUX_DIR)/$(APP)" .
 
+build-windows-amd64: fmt $(START_WINDOWS_OUT)
+	mkdir -p "$(WINDOWS_DIR)"
+	cp "$(CONFIGS)" "$(WINDOWS_DIR)/"
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+		-trimpath \
+		-ldflags="-H=windowsgui $(LDFLAGS)" \
+		-o "$(WINDOWS_DIR)/$(APP).exe" .
+
 release-linux-amd64: fmt
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
@@ -153,7 +176,15 @@ release-linux-arm64: fmt
 		-o "$(LINUX_ARM64_ASSET)" .
 	cd "$(RELEASE_DIR)" && sha256sum "$(APP)-linux-arm64" > "$(APP)-linux-arm64.sha256"
 
-release: release-linux-amd64 release-linux-arm64
+release-windows-amd64: fmt
+	mkdir -p "$(RELEASE_DIR)"
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+		-trimpath \
+		-ldflags="-H=windowsgui $(LDFLAGS)" \
+		-o "$(WINDOWS_AMD64_ASSET)" .
+	cd "$(RELEASE_DIR)" && sha256sum "$(APP)-windows-amd64.exe" > "$(APP)-windows-amd64.exe.sha256"
+
+release: release-linux-amd64 release-linux-arm64 release-windows-amd64
 
 clean:
 	rm -rf "$(BUILD_DIR)"
