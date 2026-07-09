@@ -47,7 +47,7 @@ DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: run fmt build-mac build-linux-arm64 build-linux-amd64 build-windows-amd64 start-windows release-linux-amd64 release-linux-arm64 release-windows-amd64 release clean
+.PHONY: run fmt build-mac build-linux-arm64 build-linux-amd64 build-windows-amd64 start-windows release-linux-amd64 release-linux-arm64 release-windows-amd64 release shelly-auth clean
 
 run:
 	go run . -config config.yaml
@@ -198,6 +198,10 @@ release-windows-amd64: fmt
 	cd "$(RELEASE_DIR)" && sha256sum "$(APP)-windows-amd64.exe" > "$(APP)-windows-amd64.exe.sha256"
 
 release: release-linux-amd64 release-linux-arm64 release-windows-amd64
+
+shelly-auth:
+	chmod +x scripts/set-shelly-auth.sh
+	./scripts/set-shelly-auth.sh
 
 clean:
 	rm -rf "$(BUILD_DIR)"
