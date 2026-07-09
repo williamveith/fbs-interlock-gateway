@@ -234,12 +234,12 @@ func writeConfigAtomic(path string, cfg Config) error {
 
 	backupPath := path + ".bak"
 	if oldData, err := os.ReadFile(path); err == nil {
-		_ = os.WriteFile(backupPath, oldData, 0644)
+		_ = os.WriteFile(backupPath, oldData, 0640)
 	}
 
 	tmpPath := path + ".tmp"
 
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0640); err != nil {
 		return err
 	}
 

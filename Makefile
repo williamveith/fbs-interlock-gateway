@@ -6,10 +6,16 @@ LINUX_DIR := $(BUILD_DIR)/linux
 WINDOWS_DIR := $(BUILD_DIR)/windows
 
 CONFIGS := config.yaml
+CONFIG_DIR ?= /etc/$(APP)
+CONFIG_PATH ?= $(CONFIG_DIR)/$(CONFIGS)
 
 INSTALL_DIR ?= /opt/$(APP)
 SERVICE_USER ?= fbs-gateway
 SERVICE_GROUP ?= $(SERVICE_USER)
+
+DEPLOYMENT_GUIDES_DIR := deployment guides
+LINUX_INSTALL_GUIDE := Linux Install Instructions.md
+WINDOWS_INSTALL_GUIDE := Windows Install Instructions.md
 
 SERVICE_TEMPLATE := $(SERVICE_DIR)/app.service.in
 SERVICE_OUT := $(LINUX_DIR)/$(APP).service
@@ -54,6 +60,8 @@ $(SERVICE_OUT): $(SERVICE_TEMPLATE) Makefile
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
+		-e 's|@CONFIG_DIR@|$(CONFIG_DIR)|g' \
+		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
 		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(SERVICE_TEMPLATE)" > "$@"
@@ -63,6 +71,8 @@ $(INSTALL_OUT): $(INSTALL_TEMPLATE) Makefile
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
+		-e 's|@CONFIG_DIR@|$(CONFIG_DIR)|g' \
+		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
 		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(INSTALL_TEMPLATE)" > "$@"
@@ -139,6 +149,7 @@ build-mac: fmt
 build-linux-arm64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
+	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
@@ -147,6 +158,7 @@ build-linux-arm64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERV
 build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
+	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
@@ -155,6 +167,7 @@ build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERV
 build-windows-amd64: fmt $(START_WINDOWS_OUT)
 	mkdir -p "$(WINDOWS_DIR)"
 	cp "$(CONFIGS)" "$(WINDOWS_DIR)/"
+	cp "$(DEPLOYMENT_GUIDES_DIR)/$(WINDOWS_INSTALL_GUIDE)" "$(WINDOWS_DIR)/"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="-H=windowsgui $(LDFLAGS)" \

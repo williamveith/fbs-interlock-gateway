@@ -3,6 +3,8 @@ set -euo pipefail
 
 APP="@APP@"
 INSTALL_DIR="@INSTALL_DIR@"
+CONFIG_DIR="@CONFIG_DIR@"
+CONFIG_PATH="@CONFIG_PATH@"
 SERVICE_USER="@SERVICE_USER@"
 SERVICE_GROUP="@SERVICE_GROUP@"
 SERVICE_NAME="${APP}.service"
@@ -79,10 +81,20 @@ install -o root -g root -m 0755 \
   "$BIN_SRC" \
   "$INSTALL_DIR/$APP"
 
+echo "Creating config directory..."
+install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$CONFIG_DIR"
+
 echo "Installing config.yaml..."
-install -o root -g "$SERVICE_GROUP" -m 0640 \
-  "$CONFIG_SRC" \
-  "$INSTALL_DIR/config.yaml"
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0640 \
+    "$CONFIG_SRC" \
+    "$CONFIG_PATH"
+else
+  echo "Existing config found; preserving:"
+  echo "  $CONFIG_PATH"
+  chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_PATH"
+  chmod 0640 "$CONFIG_PATH"
+fi
 
 echo "Installing systemd service..."
 install -o root -g root -m 0644 \
