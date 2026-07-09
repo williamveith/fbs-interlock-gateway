@@ -200,8 +200,8 @@ release-windows-amd64: fmt
 release: release-linux-amd64 release-linux-arm64 release-windows-amd64
 
 shelly-auth:
-	chmod +x scripts/set-shelly-auth.sh
-	./scripts/set-shelly-auth.sh
+	@chmod +x scripts/set-shelly-auth.sh
+	@./scripts/set-shelly-auth.sh
 
 clean:
 	rm -rf "$(BUILD_DIR)"
