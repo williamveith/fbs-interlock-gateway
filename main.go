@@ -529,7 +529,7 @@ func (g *Gateway) getShellyStatus(tool Tool) (ShellySwitchStatus, error) {
 		tool.SwitchID,
 	)
 
-	resp, err := g.client.Get(url)
+	resp, err := g.doShellyGET(tool, url)
 	if err != nil {
 		return status, err
 	}
@@ -555,7 +555,7 @@ func (g *Gateway) setShelly(tool Tool, on bool) error {
 		on,
 	)
 
-	resp, err := g.client.Get(url)
+	resp, err := g.doShellyGET(tool, url)
 	if err != nil {
 		return err
 	}
