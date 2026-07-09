@@ -28,6 +28,7 @@ Do not copy only the binary. The full directory is needed because it contains th
 ## Install on the Linux Computer
 
 Plug the USB flash drive into the target Linux computer.
+Copy the linux directory from the flashdrive into the downloads folder on the target linux computer.
 
 Open a terminal in the `linux` directory on the USB flash drive, then run:
 
