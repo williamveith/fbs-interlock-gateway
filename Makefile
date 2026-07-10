@@ -1,4 +1,6 @@
 APP := fbs-interlock-gateway
+CMD := ./cmd/$(APP)
+
 SERVICE_DIR := services
 BUILD_DIR := build
 MAC_DIR := $(BUILD_DIR)/darwin
@@ -47,13 +49,25 @@ DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: run fmt build-mac build-linux-arm64 build-linux-amd64 build-windows-amd64 start-windows release-linux-amd64 release-linux-arm64 release-windows-amd64 release shelly-auth clean
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+SHA256SUM := shasum -a 256
+else
+SHA256SUM := sha256sum
+endif
+
+.PHONY: run fmt test init-config build build-mac build-linux-arm64 build-linux-amd64 build-windows-amd64 start-windows release-linux-amd64 release-linux-arm64 release-windows-amd64 release shelly-auth clean
 
 run:
-	go run . -config config.yaml
+	go run $(CMD) -config $(CONFIGS)
 
 fmt:
 	go fmt ./...
+
+test:
+	go test ./...
+
+build: build-mac
 
 $(SERVICE_OUT): $(SERVICE_TEMPLATE) Makefile
 	mkdir -p "$(LINUX_DIR)"
@@ -144,7 +158,8 @@ build-mac: fmt
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(MAC_DIR)/$(APP)" .
+		-o "$(MAC_DIR)/$(APP)" \
+		$(CMD)
 
 build-linux-arm64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
@@ -153,7 +168,8 @@ build-linux-arm64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERV
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(LINUX_DIR)/$(APP)" .
+		-o "$(LINUX_DIR)/$(APP)" \
+		$(CMD)
 
 build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
@@ -162,7 +178,8 @@ build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERV
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(LINUX_DIR)/$(APP)" .
+		-o "$(LINUX_DIR)/$(APP)" \
+		$(CMD)
 
 build-windows-amd64: fmt $(START_WINDOWS_OUT)
 	mkdir -p "$(WINDOWS_DIR)"
@@ -170,32 +187,36 @@ build-windows-amd64: fmt $(START_WINDOWS_OUT)
 	cp "$(DEPLOYMENT_GUIDES_DIR)/$(WINDOWS_INSTALL_GUIDE)" "$(WINDOWS_DIR)/"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
 		-trimpath \
-		-ldflags="-H=windowsgui $(LDFLAGS)" \
-		-o "$(WINDOWS_DIR)/$(APP).exe" .
+		-ldflags="$(LDFLAGS)" \
+		-o "$(WINDOWS_DIR)/$(APP).exe" \
+		$(CMD)
 
 release-linux-amd64: fmt
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(LINUX_AMD64_ASSET)" .
-	cd "$(RELEASE_DIR)" && sha256sum "$(APP)-linux-amd64" > "$(APP)-linux-amd64.sha256"
+		-o "$(LINUX_AMD64_ASSET)" \
+		$(CMD)
+	cd "$(RELEASE_DIR)" && $(SHA256SUM) "$(APP)-linux-amd64" > "$(APP)-linux-amd64.sha256"
 
 release-linux-arm64: fmt
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
-		-o "$(LINUX_ARM64_ASSET)" .
-	cd "$(RELEASE_DIR)" && sha256sum "$(APP)-linux-arm64" > "$(APP)-linux-arm64.sha256"
+		-o "$(LINUX_ARM64_ASSET)" \
+		$(CMD)
+	cd "$(RELEASE_DIR)" && $(SHA256SUM) "$(APP)-linux-arm64" > "$(APP)-linux-arm64.sha256"
 
 release-windows-amd64: fmt
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
 		-trimpath \
-		-ldflags="-H=windowsgui $(LDFLAGS)" \
-		-o "$(WINDOWS_AMD64_ASSET)" .
-	cd "$(RELEASE_DIR)" && sha256sum "$(APP)-windows-amd64.exe" > "$(APP)-windows-amd64.exe.sha256"
+		-ldflags="$(LDFLAGS)" \
+		-o "$(WINDOWS_AMD64_ASSET)" \
+		$(CMD)
+	cd "$(RELEASE_DIR)" && $(SHA256SUM) "$(APP)-windows-amd64.exe" > "$(APP)-windows-amd64.exe.sha256"
 
 release: release-linux-amd64 release-linux-arm64 release-windows-amd64
 

@@ -1,5 +1,5 @@
 module github.com/williamveith/fbs-interlock-gateway
 
-go 1.24.13
+go 1.22
 
 require gopkg.in/yaml.v3 v3.0.1
