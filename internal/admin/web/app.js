@@ -127,6 +127,9 @@ function renderConfig() {
             <th>Shelly Host/IP</th>
             <th>Port</th>
             <th>Switch ID</th>
+            <th>Username</th>
+            <th>Password</th>
+            <th>Delete</th>
         </tr>
         ${config.tools.map((tool, index) => `
             <tr>
@@ -139,21 +142,43 @@ function renderConfig() {
                 </td>
                 <td>
                     <input
+                        type="text"
                         value="${escapeHTML(tool.interlock_name)}"
-                        onchange="config.tools[${index}].interlock_name = this.value"
+                        data-unique="interlock_name"
+                        data-index="${index}"
+                        required
+                        onchange="
+                            config.tools[${index}].interlock_name = this.value.trim();
+                            validateConfigInputs({ report: true });
+                        "
                     >
                 </td>
                 <td>
                     <input
+                        type="text"
                         value="${escapeHTML(tool.ip)}"
-                        onchange="config.tools[${index}].ip = this.value"
+                        data-unique="ip"
+                        data-index="${index}"
+                        required
+                        onchange="
+                            config.tools[${index}].ip = this.value.trim();
+                            validateConfigInputs({ report: true });
+                        "
                     >
                 </td>
                 <td>
                     <input
                         type="number"
                         value="${tool.port}"
-                        onchange="config.tools[${index}].port = Number(this.value)"
+                        data-unique="port"
+                        data-index="${index}"
+                        min="1"
+                        max="65535"
+                        required
+                        onchange="
+                            config.tools[${index}].port = Number(this.value);
+                            validateConfigInputs({ report: true });
+                        "
                     >
                 </td>
                 <td>
@@ -163,9 +188,38 @@ function renderConfig() {
                         onchange="config.tools[${index}].switch_id = Number(this.value)"
                     >
                 </td>
+                <td>
+                    <input
+                        type="text"
+                        value="${tool.username ?? ''}"
+                        onchange="config.tools[${index}].username = this.value"
+                    >
+                </td>
+                <td>
+                    <input
+                        type="password"
+                        value="${tool.password ?? ''}"
+                        onchange="config.tools[${index}].password = this.value"
+                    >
+                </td>
+                <td style="text-align: center;">
+                    <span class="glyph delete-trigger">&osol;</span>
+                </td>
             </tr>
         `).join('')}
     `;
+    enableRowDelete()
+}
+
+function enableRowDelete() {
+    const table = document.getElementById('configTable');
+
+    table.querySelectorAll('.delete-trigger').forEach((trigger, index) => {
+        trigger.addEventListener('click', () => {
+            config.tools.splice(index, 1);
+            renderConfig();
+        });
+    });
 }
 
 function addTool() {
@@ -173,10 +227,26 @@ function addTool() {
         return;
     }
 
+    const nextFreePort = ports => {
+        if (ports.length === 0) {
+            return 8081;
+        }
+
+        const portList = [...ports].sort((a, b) => a - b);
+
+        for (let i = 0; i < portList.length - 1; i++) {
+            if (portList[i + 1] - portList[i] > 1) {
+                return portList[i] + 1;
+            }
+        }
+
+        return portList.at(-1) + 1;
+    };
+
     config.tools.push({
         interlock_name: '',
         ip: '',
-        port: 8080,
+        port: nextFreePort(config.tools.map(tool => tool.port)),
         switch_id: 0,
         username: null,
         password: null,
@@ -186,9 +256,74 @@ function addTool() {
     renderConfig();
 }
 
+function normalizeUniqueValue(field, value) {
+    const normalized = String(value).trim();
+
+    return field === 'port'
+        ? normalized
+        : normalized.toLowerCase();
+}
+
+function validateConfigInputs({ report = false } = {}) {
+    const table = document.getElementById('configTable');
+    const fields = ['interlock_name', 'ip', 'port'];
+    let firstInvalid = null;
+
+    for (const field of fields) {
+        const inputs = [
+            ...table.querySelectorAll(`[data-unique="${field}"]`)
+        ];
+
+        const counts = new Map();
+
+        for (const input of inputs) {
+            const value = normalizeUniqueValue(field, input.value);
+
+            if (value !== '') {
+                counts.set(value, (counts.get(value) ?? 0) + 1);
+            }
+        }
+
+        for (const input of inputs) {
+            const value = normalizeUniqueValue(field, input.value);
+
+            let message = '';
+
+            if (value === '') {
+                message = 'This field is required.';
+            } else if (counts.get(value) > 1) {
+                const label = {
+                    interlock_name: 'Tool name',
+                    ip: 'Shelly host/IP',
+                    port: 'Port'
+                }[field];
+
+                message = `${label} must be unique.`;
+            }
+
+            input.setCustomValidity(message);
+
+            if (!input.checkValidity() && !firstInvalid) {
+                firstInvalid = input;
+            }
+        }
+    }
+
+    if (report && firstInvalid) {
+        firstInvalid.reportValidity();
+        firstInvalid.focus();
+    }
+
+    return firstInvalid === null;
+}
+
 async function saveConfig() {
     if (!config) {
         alert('Configuration has not loaded.');
+        return;
+    }
+
+    if (!validateConfigInputs({ report: true })) {
         return;
     }
 
