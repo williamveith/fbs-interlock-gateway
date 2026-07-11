@@ -44,8 +44,6 @@ type ToolStatus struct {
 	Error         string `json:"error,omitempty"`
 }
 
-// Move your existing web folder to internal/admin/web so this embed continues to work.
-//
 //go:embed web
 var embeddedWeb embed.FS
 

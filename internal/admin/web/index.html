@@ -2,7 +2,11 @@
 <html>
 
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
     <title>FBS Interlock Gateway</title>
+
     <link rel="icon" type="image/png" href="appicon.png">
     <link rel="manifest" href="site.webmanifest">
     <link rel="stylesheet" href="style.css">
@@ -11,16 +15,32 @@
 <body>
     <h1>FBS Interlock Gateway</h1>
 
-    <h2>Live Status</h2>
-    <table id="statusTable"></table>
+    <details class="table-section" open>
+        <summary>Live Status</summary>
 
-    <h2>Config</h2>
-    <table id="configTable"></table>
+        <div class="table-container">
+            <table id="statusTable"></table>
+        </div>
+    </details>
 
-    <button onclick="addTool()">Add Tool</button>
-    <button onclick="saveConfig()">Save Config</button>
+    <details class="table-section" open>
+        <summary>Config</summary>
+
+        <div class="table-container">
+            <table id="configTable"></table>
+        </div>
+
+        <div class="config-actions">
+            <button type="button" onclick="addTool()">Add Tool</button>
+            <button type="button" onclick="saveConfig()">Save Config</button>
+        </div>
+    </details>
+
     <footer>
-        Created by <a href="https://cdn.williamveith.com/?id=af59584e-d47b-4875-86cc-81b189ab069f">William Veith</a>
+        Created by
+        <a href="https://cdn.williamveith.com/?id=af59584e-d47b-4875-86cc-81b189ab069f">
+            William Veith
+        </a>
     </footer>
 
     <script src="app.js"></script>
