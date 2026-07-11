@@ -11,7 +11,7 @@ This project is designed for internal facility deployment where FBS communicates
 Current production capabilities include:
 
 - one gateway listener port per configured tool
-- FBS-compatible `/status`, `/on`, `/off`, and `/toggle` endpoints
+- FBS-compatible `/status`, `/on`, and `/off` endpoints
 - Shelly Gen2/Gen3 HTTP RPC control
 - Shelly HTTP Digest Authentication support
 - interactive Shelly authentication setup script
@@ -85,7 +85,6 @@ FBS sends HTTP requests to the gateway:
 http://<gateway-host>:<port>/status
 http://<gateway-host>:<port>/on
 http://<gateway-host>:<port>/off
-http://<gateway-host>:<port>/toggle
 ```
 
 The gateway also accepts common query-based command formats:
