@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
@@ -126,11 +127,18 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	cfg := s.store.ConfigSnapshot()
-	results := make([]ToolStatus, 0, len(cfg.Tools))
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-	for _, tool := range cfg.Tools {
-		item := ToolStatus{
+	cfg := s.store.ConfigSnapshot()
+	results := make([]ToolStatus, len(cfg.Tools))
+
+	var wg sync.WaitGroup
+
+	for i, tool := range cfg.Tools {
+		results[i] = ToolStatus{
 			InterlockName: tool.InterlockName,
 			IP:            tool.IP,
 			Port:          tool.Port,
@@ -139,22 +147,32 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !tool.Enabled {
-			results = append(results, item)
 			continue
 		}
 
-		status, err := s.statusClient.GetStatus(r.Context(), tool)
-		if err != nil {
-			item.Connected = false
-			item.Output = s.store.SafeOutput()
-			item.Error = err.Error()
-		} else {
-			item.Connected = true
-			item.Output = status.Output
-		}
+		wg.Add(1)
 
-		results = append(results, item)
+		go func(index int, tool config.Tool) {
+			defer wg.Done()
+
+			status, err := s.statusClient.GetStatus(
+				r.Context(),
+				tool,
+			)
+
+			if err != nil {
+				results[index].Connected = false
+				results[index].Output = s.store.SafeOutput()
+				results[index].Error = err.Error()
+				return
+			}
+
+			results[index].Connected = true
+			results[index].Output = status.Output
+		}(i, tool)
 	}
+
+	wg.Wait()
 
 	writeJSON(w, http.StatusOK, results)
 }
