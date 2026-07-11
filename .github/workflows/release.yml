@@ -1,0 +1,198 @@
+name: Validate, Tag, and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example v1.4.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Validate, Tag, and Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Require main branch
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Releases must be created from the main branch."
+            echo "Current ref: ${GITHUB_REF}"
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate version
+        id: version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: ${VERSION}"
+            echo "Expected a version such as v1.4.0"
+            exit 1
+          fi
+
+          if git rev-parse "${VERSION}" >/dev/null 2>&1; then
+            echo "Tag already exists: ${VERSION}"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify repository
+        run: make verify
+
+      - name: Build release assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          make clean
+
+          make release \
+            VERSION="${VERSION}" \
+            COMMIT="${GITHUB_SHA::7}" \
+            DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+      - name: Verify release files exist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          files=(
+            "build/release/fbs-interlock-gateway-linux-amd64"
+            "build/release/fbs-interlock-gateway-linux-amd64.sha256"
+            "build/release/fbs-interlock-gateway-linux-arm64"
+            "build/release/fbs-interlock-gateway-linux-arm64.sha256"
+            "build/release/fbs-interlock-gateway-windows-amd64.exe"
+            "build/release/fbs-interlock-gateway-windows-amd64.exe.sha256"
+          )
+
+          for file in "${files[@]}"; do
+            if [[ ! -f "${file}" ]]; then
+              echo "Missing release file: ${file}"
+              exit 1
+            fi
+          done
+
+      - name: Verify checksums
+        working-directory: build/release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha256sum --check fbs-interlock-gateway-linux-amd64.sha256
+          sha256sum --check fbs-interlock-gateway-linux-arm64.sha256
+          sha256sum --check fbs-interlock-gateway-windows-amd64.exe.sha256
+
+      - name: Verify binary formats
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          file build/release/fbs-interlock-gateway-linux-amd64 \
+            | grep -q "ELF 64-bit.*x86-64"
+
+          file build/release/fbs-interlock-gateway-linux-arm64 \
+            | grep -q "ELF 64-bit.*ARM aarch64"
+
+          file build/release/fbs-interlock-gateway-windows-amd64.exe \
+            | grep -q "PE32+ executable.*x86-64"
+
+      - name: Verify embedded version
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          output="$(
+            ./build/release/fbs-interlock-gateway-linux-amd64 -version
+          )"
+
+          echo "${output}"
+
+          if [[ "${output}" != *"version=${VERSION}"* ]]; then
+            echo "Expected binary version ${VERSION}"
+            exit 1
+          fi
+
+          if [[ "${output}" != *"commit=${GITHUB_SHA::7}"* ]]; then
+            echo "Expected binary commit ${GITHUB_SHA::7}"
+            exit 1
+          fi
+
+      - name: Ensure repository is unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+            echo "The build modified tracked repository files:"
+            git status --short
+            git diff
+            exit 1
+          fi
+
+      - name: Create and push tag
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag \
+            --annotate "${VERSION}" \
+            --message "Release ${VERSION}" \
+            "${GITHUB_SHA}"
+
+          git push origin "${VERSION}"
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          gh release create "${VERSION}" \
+            build/release/fbs-interlock-gateway-linux-amd64 \
+            build/release/fbs-interlock-gateway-linux-amd64.sha256 \
+            build/release/fbs-interlock-gateway-linux-arm64 \
+            build/release/fbs-interlock-gateway-linux-arm64.sha256 \
+            build/release/fbs-interlock-gateway-windows-amd64.exe \
+            build/release/fbs-interlock-gateway-windows-amd64.exe.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "${VERSION}"

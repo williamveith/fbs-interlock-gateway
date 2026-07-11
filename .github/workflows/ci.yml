@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify repository
+        run: make verify
+
+      - name: Smoke-test Linux AMD64 binary
+        run: |
+          output="$(./build/ci/fbs-interlock-gateway-linux-amd64 -version)"
+          echo "$output"
+          grep -q 'fbs-interlock-gateway version=' <<<"$output"
+
+      - name: Inspect binary formats
+        run: |
+          file build/ci/fbs-interlock-gateway-linux-amd64
+          file build/ci/fbs-interlock-gateway-linux-arm64
+          file build/ci/fbs-interlock-gateway-windows-amd64.exe
