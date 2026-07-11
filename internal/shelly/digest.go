@@ -1,77 +1,14 @@
-package main
+package shelly
 
 import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 )
 
-func (g *Gateway) doShellyGET(tool Tool, url string) (*http.Response, error) {
-	// If no password is configured, preserve the old unauthenticated behavior.
-	if tool.Password == nil || strings.TrimSpace(*tool.Password) == "" {
-		return g.client.Get(url)
-	}
-
-	username := "admin"
-	if tool.Username != nil && strings.TrimSpace(*tool.Username) != "" {
-		username = strings.TrimSpace(*tool.Username)
-	}
-
-	password := *tool.Password
-
-	// First request intentionally has no Authorization header.
-	// Shelly responds with 401 and a WWW-Authenticate digest challenge.
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	// If auth is not enabled yet, Shelly may return 200 immediately.
-	if resp.StatusCode != http.StatusUnauthorized {
-		return resp, nil
-	}
-
-	challenge := resp.Header.Get("WWW-Authenticate")
-
-	// Drain and close the 401 body before retrying.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	_ = resp.Body.Close()
-
-	if challenge == "" {
-		return nil, fmt.Errorf("shelly returned 401 but no WWW-Authenticate header")
-	}
-
-	authHeader, err := buildShellyDigestAuthHeader(
-		http.MethodGet,
-		req.URL.RequestURI(),
-		username,
-		password,
-		challenge,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	retryReq, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	retryReq.Header.Set("Authorization", authHeader)
-
-	return g.client.Do(retryReq)
-}
-
-func buildShellyDigestAuthHeader(method, uri, username, password, challenge string) (string, error) {
+func buildDigestAuthHeader(method, uri, username, password, challenge string) (string, error) {
 	params := parseDigestChallenge(challenge)
 
 	realm := params["realm"]
@@ -100,8 +37,6 @@ func buildShellyDigestAuthHeader(method, uri, username, password, challenge stri
 	ha1 := sha256Hex(username + ":" + realm + ":" + password)
 	ha2 := sha256Hex(method + ":" + uri)
 
-	response := ""
-
 	if qop == "auth" {
 		nc := "00000001"
 
@@ -110,7 +45,7 @@ func buildShellyDigestAuthHeader(method, uri, username, password, challenge stri
 			return "", err
 		}
 
-		response = sha256Hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2)
+		response := sha256Hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2)
 
 		header := fmt.Sprintf(
 			`Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=SHA-256, response="%s", qop=auth, nc=%s, cnonce="%s"`,
@@ -130,8 +65,7 @@ func buildShellyDigestAuthHeader(method, uri, username, password, challenge stri
 		return header, nil
 	}
 
-	// Fallback for older/legacy digest challenges without qop.
-	response = sha256Hex(ha1 + ":" + nonce + ":" + ha2)
+	response := sha256Hex(ha1 + ":" + nonce + ":" + ha2)
 
 	header := fmt.Sprintf(
 		`Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=SHA-256, response="%s"`,
@@ -191,7 +125,6 @@ func parseDigestChallenge(header string) map[string]string {
 
 		key = strings.ToLower(strings.TrimSpace(key))
 		value = strings.TrimSpace(value)
-
 		value = strings.Trim(value, `"`)
 
 		result[key] = value
