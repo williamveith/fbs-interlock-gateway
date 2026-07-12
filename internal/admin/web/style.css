@@ -155,6 +155,12 @@ input:not([type]) {
         background 120ms ease;
 }
 
+input::placeholder {
+  font-style: italic;
+  color: #757575;
+  opacity: 0.75;
+}
+
 td.span {
     width: 100%;
     min-height: 36px;
