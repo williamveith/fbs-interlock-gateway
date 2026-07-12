@@ -113,7 +113,7 @@ func TestHandleConfigGet(t *testing.T) {
 		)
 	}
 
-	if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/json; charset=utf-8" {
 		t.Fatalf(
 			"expected application/json content type, got %q",
 			contentType,

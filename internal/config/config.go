@@ -8,6 +8,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	MinToolPort = 8081
+	MaxToolPort = 8981
+)
+
 type Config struct {
 	Bind     string   `yaml:"bind" json:"bind"`
 	Defaults Defaults `yaml:"defaults" json:"defaults"`
@@ -125,8 +130,8 @@ func ValidateTool(t Tool) error {
 	if t.InterlockName == "" {
 		return fmt.Errorf("missing interlock_name")
 	}
-	if t.Port <= 0 || t.Port > 65535 {
-		return fmt.Errorf("invalid port %d", t.Port)
+	if t.Port < MinToolPort || t.Port > MaxToolPort {
+		return fmt.Errorf("tool %q port must be between %d and %d", t.InterlockName, MinToolPort, MaxToolPort)
 	}
 	if t.IP == "" {
 		return fmt.Errorf("missing ip")
