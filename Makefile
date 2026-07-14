@@ -1,7 +1,8 @@
 APP := fbs-interlock-gateway
 CMD := ./cmd/$(APP)
 
-SERVICE_DIR := services
+SERVICE_DIR_WINDOWS := services/windows
+SERVICE_DIR_LINUX := services/linux
 BUILD_DIR := build
 MAC_DIR := $(BUILD_DIR)/darwin
 LINUX_DIR := $(BUILD_DIR)/linux
@@ -19,23 +20,23 @@ DEPLOYMENT_GUIDES_DIR := deployment guides
 LINUX_INSTALL_GUIDE := Linux Install Instructions.md
 WINDOWS_INSTALL_GUIDE := Windows Install Instructions.md
 
-SERVICE_TEMPLATE := $(SERVICE_DIR)/app.service.in
+SERVICE_TEMPLATE := $(SERVICE_DIR_LINUX)/app.service.in
 SERVICE_OUT := $(LINUX_DIR)/$(APP).service
 
-INSTALL_TEMPLATE := $(SERVICE_DIR)/install-linux.sh.in
+INSTALL_TEMPLATE := $(SERVICE_DIR_LINUX)/install-linux.sh.in
 INSTALL_OUT := $(LINUX_DIR)/install.sh
 
-UPDATE_TEMPLATE := $(SERVICE_DIR)/update-linux.sh.in
+UPDATE_TEMPLATE := $(SERVICE_DIR_LINUX)/update-linux.sh.in
 UPDATE_OUT := $(LINUX_DIR)/update.sh
 
-UPDATE_SERVICE_TEMPLATE := $(SERVICE_DIR)/update.service.in
-UPDATE_TIMER_TEMPLATE := $(SERVICE_DIR)/update.timer.in
+UPDATE_SERVICE_TEMPLATE := $(SERVICE_DIR_LINUX)/update.service.in
+UPDATE_TIMER_TEMPLATE := $(SERVICE_DIR_LINUX)/update.timer.in
 
 UPDATE_SERVICE_OUT := $(LINUX_DIR)/$(APP)-update.service
 UPDATE_TIMER_OUT := $(LINUX_DIR)/$(APP)-update.timer
 
 WINDOWS_INSTALL_DIR ?= C:/FBS/$(APP)
-START_WINDOWS_TEMPLATE := $(SERVICE_DIR)/start-windows.bat.in
+START_WINDOWS_TEMPLATE := $(SERVICE_DIR_WINDOWS)/start-windows.bat.in
 START_WINDOWS_OUT := $(WINDOWS_DIR)/start.bat
 
 RELEASE_DIR := $(BUILD_DIR)/release
@@ -297,7 +298,7 @@ test-race:
 
 scripts-check:
 	bash -n scripts/*.sh
-	bash -n services/*.sh.in
+	bash -n "$(INSTALL_TEMPLATE)" "$(UPDATE_TEMPLATE)"
 
 build-check:
 	mkdir -p "$(BUILD_DIR)/ci"
