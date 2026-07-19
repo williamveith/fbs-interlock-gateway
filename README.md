@@ -57,7 +57,7 @@ The admin UI binds to `127.0.0.1:18090` by default. This keeps configuration edi
 ## System architecture
 
 ```text
-+------------+        HTTP         +-----------------------+       HTTP RPC + optional Digest Auth       +---------------------+
++------------+        HTTP         +-----------------------+  HTTP RPC + optional Digest Auth   +---------------------+
 |            |  /status /on /off   |                       |   Switch.GetStatus / Switch.Set    |                     |
 | FBS Server | <-----------------> | fbs-interlock-gateway | <--------------------------------> | Shelly Relay Box    |
 |            |                     |                       |                                    | / Network Interlock |
@@ -732,25 +732,191 @@ Current defaults:
 
 ## Continuous integration and releases
 
-The v2.5.0 CI workflow runs for pull requests and pushes to `main`. It:
+All changes should reach `main` through a short-lived feature branch and pull request. The `main` branch should remain releasable at all times.
+
+### Create a feature branch
+
+Start from an up-to-date local copy of `main`:
+
+```bash
+git switch main
+git pull --ff-only origin main
+```
+
+Create a branch whose name describes the work:
+
+```bash
+git switch -c feature/<short-description>
+```
+
+Common branch prefixes include:
+
+```text
+feature/   new functionality
+fix/       bug fixes
+docs/      documentation-only changes
+refactor/  internal restructuring without an intended behavior change
+```
+
+Examples:
+
+```bash
+git switch -c feature/add-health-endpoint
+git switch -c fix/admin-status-timeout
+git switch -c docs/release-process
+```
+
+Make the changes, format the source, and run the same validation gate used by CI:
+
+```bash
+make fmt
+make verify
+```
+
+Review the changes before committing:
+
+```bash
+git status
+git diff
+```
+
+Stage and commit the work:
+
+```bash
+git add -A
+git commit -S -m "Describe the change"
+```
+
+`-S` signs the commit with the configured Git signing key. It may be omitted when `commit.gpgsign=true` is already enabled in the local Git configuration.
+
+### Push the feature branch and open a pull request
+
+Push the branch to GitHub and configure its upstream tracking branch:
+
+```bash
+git push --set-upstream origin feature/<short-description>
+```
+
+Open a pull request into `main` through GitHub, or with GitHub CLI:
+
+```bash
+gh pr create \
+  --base main \
+  --head feature/<short-description> \
+  --fill
+```
+
+The CI workflow runs automatically for every pull request. It:
 
 1. installs the Go version declared in `go.mod`
 2. runs `make verify`
 3. smoke-tests the Linux AMD64 binary with `-version`
 4. inspects the generated Linux and Windows binary formats
 
-The manually triggered release workflow:
+If review or CI requires another change, commit it to the same feature branch and push again:
+
+```bash
+git add -A
+git commit -S -m "Address review feedback"
+git push
+```
+
+The pull request updates automatically and CI runs again.
+
+### Merge the feature branch into `main`
+
+Merge the pull request only after required review is complete and CI passes. Do not bypass the pull-request workflow by pushing feature work directly to `main`.
+
+After the pull request is merged, update the local repository and remove stale remote-tracking branches:
+
+```bash
+git switch main
+git pull --ff-only origin main
+git fetch --prune
+```
+
+Delete the local feature branch after confirming that the pull request was merged:
+
+```bash
+git branch -d feature/<short-description>
+```
+
+A push to `main` triggers CI again, providing a final validation of the merged result.
+
+### Create a release
+
+Releases are created by the manually triggered **Validate, Tag, and Release** GitHub Actions workflow. Do not create or push the release tag manually; the workflow creates the signed tag at the exact `main` commit that it validates and packages.
+
+Before starting a release:
+
+1. Merge all intended changes into `main`.
+2. Confirm the pull-request checks passed.
+3. Confirm `main` contains the exact commit that should be released.
+4. Choose a new semantic version that does not already exist.
+
+Version examples:
+
+```text
+v2.5.1       patch release
+v2.6.0       minor release
+v3.0.0       major release
+v2.6.0-rc.1  prerelease candidate
+```
+
+To create the release through GitHub:
+
+1. Open the repository on GitHub.
+2. Select **Actions**.
+3. Select **Validate, Tag, and Release**.
+4. Select **Run workflow**.
+5. Choose the `main` branch.
+6. Enter the version, including the leading `v`, such as `v2.6.0`.
+7. Select **Run workflow**.
+8. Approve the `release` environment when an approval rule is configured.
+
+The workflow can also be started with GitHub CLI:
+
+```bash
+gh workflow run release.yml \
+  --ref main \
+  -f version=v2.6.0
+```
+
+The release workflow:
 
 1. requires the `main` branch
-2. validates the requested version
-3. rejects an existing tag
-4. runs `make verify`
-5. builds all release assets
-6. verifies asset existence and SHA-256 checksums
-7. verifies binary formats and architectures
-8. verifies embedded version and commit metadata
-9. confirms that the build did not modify tracked files
-10. creates an annotated tag and GitHub release only after validation succeeds
+2. checks out the complete repository history and tags
+3. imports the protected release-signing GPG key
+4. validates the requested version format
+5. rejects a version whose tag already exists
+6. runs `make verify`
+7. builds the Linux AMD64, Linux ARM64, and Windows AMD64 release assets
+8. verifies asset existence and SHA-256 checksums
+9. verifies binary formats and architectures
+10. verifies embedded version and commit metadata
+11. confirms that the build did not modify tracked files
+12. creates and locally verifies a GPG-signed annotated tag
+13. pushes the signed tag to GitHub
+14. creates a GitHub release with generated release notes and the validated assets
+
+The `release` GitHub environment must contain these secrets:
+
+```text
+GPG_PRIVATE_KEY
+GPG_PASSPHRASE
+```
+
+The matching public GPG key must also be registered with the GitHub account associated with the tagger email so GitHub can display the tag signature as verified.
+
+After the workflow succeeds, verify the release and signed tag locally:
+
+```bash
+git fetch origin --tags
+git tag -v v2.6.0
+gh release view v2.6.0
+```
+
+Replace `v2.6.0` with the version that was released.
 
 ## Local testing
 
