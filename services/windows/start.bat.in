@@ -1,0 +1,8 @@
+@echo off
+setlocal
+
+cd /d "@WINDOWS_INSTALL_DIR@"
+
+if not exist "logs" mkdir "logs"
+
+"@APP@.exe" >> "logs\gateway.log" 2>&1

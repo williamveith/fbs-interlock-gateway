@@ -1,0 +1,235 @@
+#Requires -Version 5.1
+
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+
+$AppName = '@APP@'
+$TaskName = 'FBS Interlock Gateway'
+$FirewallRuleName = 'FBS Interlock Gateway'
+$InstallDirectory = '@WINDOWS_INSTALL_DIR@'
+$SourceDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$ExecutableName = "$AppName.exe"
+$ExecutableSource = Join-Path $SourceDirectory $ExecutableName
+$ExecutableDestination = Join-Path $InstallDirectory $ExecutableName
+
+$ConfigName = 'config.yaml'
+$ConfigSource = Join-Path $SourceDirectory $ConfigName
+$ConfigDestination = Join-Path $InstallDirectory $ConfigName
+
+$StartScriptName = 'start.bat'
+$StartScriptSource = Join-Path $SourceDirectory $StartScriptName
+$StartScriptDestination = Join-Path $InstallDirectory $StartScriptName
+
+function Assert-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+
+    $isAdministrator = $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+
+    if (-not $isAdministrator) {
+        throw 'Administrator privileges are required to install the gateway.'
+    }
+}
+
+function Assert-DeploymentFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Required deployment file was not found: $Path"
+    }
+}
+
+function Stop-ExistingGateway {
+    Write-Host 'Stopping the existing scheduled task and gateway process...'
+
+    $existingTask = Get-ScheduledTask `
+        -TaskName $TaskName `
+        -ErrorAction SilentlyContinue
+
+    if ($null -ne $existingTask) {
+        Stop-ScheduledTask `
+            -TaskName $TaskName `
+            -ErrorAction SilentlyContinue
+    }
+
+    Get-Process `
+        -Name $AppName `
+        -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+
+    Start-Sleep -Seconds 1
+}
+
+function Install-ApplicationFiles {
+    Write-Host "Creating installation directory: $InstallDirectory"
+
+    New-Item `
+        -ItemType Directory `
+        -Path $InstallDirectory `
+        -Force |
+        Out-Null
+
+    New-Item `
+        -ItemType Directory `
+        -Path (Join-Path $InstallDirectory 'logs') `
+        -Force |
+        Out-Null
+
+    Write-Host "Installing $ExecutableName..."
+
+    Copy-Item `
+        -LiteralPath $ExecutableSource `
+        -Destination $ExecutableDestination `
+        -Force
+
+    Write-Host "Installing $StartScriptName..."
+
+    Copy-Item `
+        -LiteralPath $StartScriptSource `
+        -Destination $StartScriptDestination `
+        -Force
+
+    if (Test-Path -LiteralPath $ConfigDestination -PathType Leaf) {
+        Write-Host 'Preserving the existing production configuration file.'
+    }
+    else {
+        Write-Host "Installing the initial $ConfigName..."
+
+        Copy-Item `
+            -LiteralPath $ConfigSource `
+            -Destination $ConfigDestination `
+            -Force
+    }
+}
+
+function Install-FirewallRule {
+    Write-Host 'Configuring the Windows Firewall rule...'
+
+    Get-NetFirewallRule `
+        -DisplayName $FirewallRuleName `
+        -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule `
+            -ErrorAction SilentlyContinue
+
+    New-NetFirewallRule `
+        -DisplayName $FirewallRuleName `
+        -Description 'Allows inbound connections to the FBS Interlock Gateway.' `
+        -Direction Inbound `
+        -Program $ExecutableDestination `
+        -Action Allow `
+        -Profile Any |
+        Out-Null
+}
+
+function Install-ScheduledTask {
+    Write-Host 'Registering the automatic startup task...'
+
+    $taskArgument = '/c ""{0}""' -f $StartScriptDestination
+
+    $action = New-ScheduledTaskAction `
+        -Execute "$env:SystemRoot\System32\cmd.exe" `
+        -Argument $taskArgument `
+        -WorkingDirectory $InstallDirectory
+
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId 'SYSTEM' `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
+
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -RestartCount 10 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew
+
+    Register-ScheduledTask `
+        -TaskName $TaskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Description 'Runs the FBS Interlock Gateway automatically at system startup.' `
+        -Force |
+        Out-Null
+}
+
+function Start-Gateway {
+    Write-Host 'Starting the FBS Interlock Gateway...'
+
+    Start-ScheduledTask -TaskName $TaskName
+
+    Start-Sleep -Seconds 3
+
+    $task = Get-ScheduledTask -TaskName $TaskName
+    $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName
+
+    Write-Host ''
+    Write-Host "Task state:       $($task.State)"
+    Write-Host "Last task result: $($taskInfo.LastTaskResult)"
+}
+
+function Test-AdminPanel {
+    Write-Host ''
+    Write-Host 'Checking the admin panel...'
+
+    try {
+        $response = Invoke-WebRequest `
+            -Uri 'http://127.0.0.1:18090/api/status' `
+            -UseBasicParsing `
+            -TimeoutSec 5
+
+        Write-Host "Admin panel responded with HTTP $($response.StatusCode)."
+    }
+    catch {
+        Write-Warning @'
+The admin panel did not respond yet. The gateway may still be starting, or
+the configuration may need attention.
+
+Check the log at:
+'@
+
+        Write-Warning (Join-Path $InstallDirectory 'logs\gateway.log')
+    }
+}
+
+Assert-Administrator
+
+Assert-DeploymentFile -Path $ExecutableSource
+Assert-DeploymentFile -Path $ConfigSource
+Assert-DeploymentFile -Path $StartScriptSource
+
+Write-Host ''
+Write-Host 'FBS Interlock Gateway Windows Installer'
+Write-Host '========================================'
+Write-Host ''
+
+Stop-ExistingGateway
+Install-ApplicationFiles
+Install-FirewallRule
+Install-ScheduledTask
+Start-Gateway
+Test-AdminPanel
+
+Write-Host ''
+Write-Host 'Installation completed successfully.'
+Write-Host ''
+Write-Host "Installation directory: $InstallDirectory"
+Write-Host "Configuration file:     $ConfigDestination"
+Write-Host "Log file:                $(Join-Path $InstallDirectory 'logs\gateway.log')"
+Write-Host "Scheduled task:          $TaskName"
+Write-Host 'Admin panel:             http://127.0.0.1:18090'
+Write-Host ''

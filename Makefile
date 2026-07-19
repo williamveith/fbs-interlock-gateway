@@ -39,8 +39,25 @@ UPDATE_SERVICE_OUT := $(LINUX_DIR)/$(APP)-update.service
 UPDATE_TIMER_OUT := $(LINUX_DIR)/$(APP)-update.timer
 
 WINDOWS_INSTALL_DIR ?= C:/FBS/$(APP)
-START_WINDOWS_TEMPLATE := $(SERVICE_DIR_WINDOWS)/start-windows.bat.in
-START_WINDOWS_OUT := $(WINDOWS_DIR)/start.bat
+
+WINDOWS_START_TEMPLATE := $(SERVICE_DIR_WINDOWS)/start.bat.in
+WINDOWS_INSTALL_BAT_TEMPLATE := $(SERVICE_DIR_WINDOWS)/install.bat.in
+WINDOWS_INSTALL_PS1_TEMPLATE := $(SERVICE_DIR_WINDOWS)/install.ps1.in
+WINDOWS_UNINSTALL_BAT_TEMPLATE := $(SERVICE_DIR_WINDOWS)/uninstall.bat.in
+WINDOWS_UNINSTALL_PS1_TEMPLATE := $(SERVICE_DIR_WINDOWS)/uninstall.ps1.in
+
+WINDOWS_START_OUT := $(WINDOWS_DIR)/start.bat
+WINDOWS_INSTALL_BAT_OUT := $(WINDOWS_DIR)/install.bat
+WINDOWS_INSTALL_PS1_OUT := $(WINDOWS_DIR)/install.ps1
+WINDOWS_UNINSTALL_BAT_OUT := $(WINDOWS_DIR)/uninstall.bat
+WINDOWS_UNINSTALL_PS1_OUT := $(WINDOWS_DIR)/uninstall.ps1
+
+WINDOWS_DEPLOYMENT_FILES := \
+	$(WINDOWS_START_OUT) \
+	$(WINDOWS_INSTALL_BAT_OUT) \
+	$(WINDOWS_INSTALL_PS1_OUT) \
+	$(WINDOWS_UNINSTALL_BAT_OUT) \
+	$(WINDOWS_UNINSTALL_PS1_OUT)
 
 RELEASE_DIR := $(BUILD_DIR)/release
 LINUX_AMD64_ASSET := $(RELEASE_DIR)/$(APP)-linux-amd64
@@ -81,7 +98,7 @@ endif
 	build-linux-arm64 \
 	build-linux-amd64 \
 	build-windows-amd64 \
-	start-windows \
+	windows-deployment-files \
 	release-linux-amd64 \
 	release-linux-arm64 \
 	release-windows-amd64 \
@@ -161,14 +178,42 @@ $(UPDATE_TIMER_OUT): $(UPDATE_TIMER_TEMPLATE) Makefile
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(UPDATE_TIMER_TEMPLATE)" > "$@"
 
-$(START_WINDOWS_OUT): $(START_WINDOWS_TEMPLATE) Makefile
+$(WINDOWS_START_OUT): $(WINDOWS_START_TEMPLATE) Makefile
 	mkdir -p "$(WINDOWS_DIR)"
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
-		"$(START_WINDOWS_TEMPLATE)" > "$@"
+		"$(WINDOWS_START_TEMPLATE)" > "$@"
 
-start-windows: $(START_WINDOWS_OUT)
+$(WINDOWS_INSTALL_BAT_OUT): $(WINDOWS_INSTALL_BAT_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		"$(WINDOWS_INSTALL_BAT_TEMPLATE)" > "$@"
+
+$(WINDOWS_INSTALL_PS1_OUT): $(WINDOWS_INSTALL_PS1_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		"$(WINDOWS_INSTALL_PS1_TEMPLATE)" > "$@"
+
+$(WINDOWS_UNINSTALL_BAT_OUT): $(WINDOWS_UNINSTALL_BAT_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		"$(WINDOWS_UNINSTALL_BAT_TEMPLATE)" > "$@"
+
+$(WINDOWS_UNINSTALL_PS1_OUT): $(WINDOWS_UNINSTALL_PS1_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		"$(WINDOWS_UNINSTALL_PS1_TEMPLATE)" > "$@"
+
+windows-deployment-files: $(WINDOWS_DEPLOYMENT_FILES)
 
 # =========================
 # CONFIGURATION
@@ -230,7 +275,7 @@ build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERV
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-windows-amd64: fmt $(START_WINDOWS_OUT)
+build-windows-amd64: fmt $(WINDOWS_DEPLOYMENT_FILES)
 	mkdir -p "$(WINDOWS_DIR)"
 	cp "$(CONFIGS)" "$(WINDOWS_DIR)/"
 	cp "$(DEPLOYMENT_GUIDES_DIR)/$(WINDOWS_INSTALL_GUIDE)" "$(WINDOWS_DIR)/"
