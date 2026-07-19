@@ -9,6 +9,18 @@ SERVICE_USER="@SERVICE_USER@"
 SERVICE_GROUP="@SERVICE_GROUP@"
 SERVICE_NAME="${APP}.service"
 
+FBS_SOURCE_IP="@FBS_SOURCE_IP@"
+FBS_PORT_RANGE="@FBS_PORT_RANGE@"
+
+REQUIRED_PACKAGES=(
+  lsof
+  curl
+  ca-certificates
+  ufw
+)
+
+EXPECTED_UFW_RULE="ufw allow from ${FBS_SOURCE_IP} to any port ${FBS_PORT_RANGE} proto tcp"
+
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BIN_SRC="${SOURCE_DIR}/${APP}"
@@ -38,6 +50,127 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
   fi
 fi
+
+install_missing_dependencies() {
+  local missing_packages=()
+  local package=""
+  local package_status=""
+
+  if ! command -v dpkg-query >/dev/null 2>&1; then
+    echo "ERROR: dpkg-query is required to check installed packages."
+    exit 1
+  fi
+
+  for package in "${REQUIRED_PACKAGES[@]}"; do
+    package_status="$(
+      dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true
+    )"
+
+    if [[ "$package_status" != "install ok installed" ]]; then
+      missing_packages+=("$package")
+    fi
+  done
+
+  if [[ "${#missing_packages[@]}" -eq 0 ]]; then
+    echo "Required dependencies are already installed."
+    echo
+    return
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "ERROR: apt-get is required to install missing dependencies."
+    echo "Missing packages:"
+    printf '  %s\n' "${missing_packages[@]}"
+    exit 1
+  fi
+
+  echo "Installing missing dependencies:"
+  printf '  %s\n' "${missing_packages[@]}"
+  echo
+
+  apt-get update
+
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    --no-install-recommends \
+    "${missing_packages[@]}"
+
+  echo
+  echo "Dependency installation complete."
+  echo
+}
+
+configure_ufw() {
+  local current_input_policy=""
+  local current_output_policy=""
+  local added_rules=""
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    echo "ERROR: ufw is required but is not available."
+    exit 1
+  fi
+
+  echo "Checking UFW configuration..."
+
+  if [[ -r /etc/default/ufw ]]; then
+    current_input_policy="$(
+      sed -n \
+        's/^[[:space:]]*DEFAULT_INPUT_POLICY="\([^"]*\)".*/\1/p' \
+        /etc/default/ufw |
+        head -n 1
+    )"
+
+    current_output_policy="$(
+      sed -n \
+        's/^[[:space:]]*DEFAULT_OUTPUT_POLICY="\([^"]*\)".*/\1/p' \
+        /etc/default/ufw |
+        head -n 1
+    )"
+  fi
+
+  if [[ "$current_input_policy" != "DROP" ]]; then
+    echo "Setting the default incoming policy to deny..."
+    ufw default deny incoming
+  else
+    echo "Default incoming policy is already set to deny."
+  fi
+
+  if [[ "$current_output_policy" != "ACCEPT" ]]; then
+    echo "Setting the default outgoing policy to allow..."
+    ufw default allow outgoing
+  else
+    echo "Default outgoing policy is already set to allow."
+  fi
+
+  added_rules="$(ufw show added 2>/dev/null || true)"
+
+  if grep -Fqx "$EXPECTED_UFW_RULE" <<<"$added_rules"; then
+    echo "Required FBS firewall rule is already present."
+  else
+    echo "Adding the required FBS firewall rule..."
+
+    ufw allow \
+      from "$FBS_SOURCE_IP" \
+      to any \
+      port "$FBS_PORT_RANGE" \
+      proto tcp
+  fi
+
+  if [[ -r /etc/ufw/ufw.conf ]] &&
+    grep -Eq '^[[:space:]]*ENABLED=yes[[:space:]]*$' /etc/ufw/ufw.conf; then
+    echo "UFW is already enabled."
+  else
+    echo "Enabling UFW..."
+    ufw --force enable
+  fi
+
+  echo
+  echo "Current UFW configuration:"
+  ufw status verbose
+  echo
+}
+
+install_missing_dependencies
+configure_ufw
 
 if [[ ! -f "$BIN_SRC" ]]; then
   echo "ERROR: Missing application binary:"
@@ -74,50 +207,81 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 
 echo "Creating install directory..."
-install -d -o root -g "$SERVICE_GROUP" -m 0750 "$INSTALL_DIR"
+install -d \
+  -o root \
+  -g "$SERVICE_GROUP" \
+  -m 0750 \
+  "$INSTALL_DIR"
 
 echo "Installing application binary..."
-install -o root -g root -m 0755 \
+install \
+  -o root \
+  -g root \
+  -m 0755 \
   "$BIN_SRC" \
   "$INSTALL_DIR/$APP"
 
 echo "Creating config directory..."
-install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$CONFIG_DIR"
+install -d \
+  -o "$SERVICE_USER" \
+  -g "$SERVICE_GROUP" \
+  -m 0750 \
+  "$CONFIG_DIR"
 
 echo "Installing config.yaml..."
+
 if [[ ! -f "$CONFIG_PATH" ]]; then
-  install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0640 \
+  install \
+    -o "$SERVICE_USER" \
+    -g "$SERVICE_GROUP" \
+    -m 0640 \
     "$CONFIG_SRC" \
     "$CONFIG_PATH"
 else
   echo "Existing config found; preserving:"
   echo "  $CONFIG_PATH"
+
   chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_PATH"
   chmod 0640 "$CONFIG_PATH"
 fi
 
 echo "Installing systemd service..."
-install -o root -g root -m 0644 \
+install \
+  -o root \
+  -g root \
+  -m 0644 \
   "$SERVICE_SRC" \
   "/etc/systemd/system/$SERVICE_NAME"
 
 if [[ -f "$UPDATE_SERVICE_SRC" ]]; then
   echo "Installing auto-update service..."
-  install -o root -g root -m 0644 \
+
+  install \
+    -o root \
+    -g root \
+    -m 0644 \
     "$UPDATE_SERVICE_SRC" \
     "/etc/systemd/system/$UPDATE_SERVICE_NAME"
 fi
 
 if [[ -f "$UPDATE_TIMER_SRC" ]]; then
   echo "Installing auto-update timer..."
-  install -o root -g root -m 0644 \
+
+  install \
+    -o root \
+    -g root \
+    -m 0644 \
     "$UPDATE_TIMER_SRC" \
     "/etc/systemd/system/$UPDATE_TIMER_NAME"
 fi
 
 if [[ -f "$UPDATE_SRC" ]]; then
   echo "Installing update.sh..."
-  install -o root -g root -m 0755 \
+
+  install \
+    -o root \
+    -g root \
+    -m 0755 \
     "$UPDATE_SRC" \
     "$INSTALL_DIR/update.sh"
 fi
@@ -139,4 +303,5 @@ systemctl restart "$SERVICE_NAME"
 echo
 echo "Install complete."
 echo
+
 systemctl --no-pager --full status "$SERVICE_NAME"

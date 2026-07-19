@@ -16,6 +16,9 @@ INSTALL_DIR ?= /opt/$(APP)
 SERVICE_USER ?= fbs-gateway
 SERVICE_GROUP ?= $(SERVICE_USER)
 
+FBS_SOURCE_IP=146.6.76.61
+FBS_PORT_RANGE=8081:8981
+
 DEPLOYMENT_GUIDES_DIR := deployment guides
 LINUX_INSTALL_GUIDE := Linux Install Instructions.md
 WINDOWS_INSTALL_GUIDE := Windows Install Instructions.md
@@ -125,6 +128,8 @@ $(INSTALL_OUT): $(INSTALL_TEMPLATE) Makefile
 		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
 		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
+		-e 's|@FBS_SOURCE_IP@|$(FBS_SOURCE_IP)|g' \
+		-e 's|@FBS_PORT_RANGE@|$(FBS_PORT_RANGE)|g' \
 		"$(INSTALL_TEMPLATE)" > "$@"
 	chmod +x "$@"
 

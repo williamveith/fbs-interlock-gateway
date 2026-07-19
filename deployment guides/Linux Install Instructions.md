@@ -4,8 +4,9 @@
 
 * [Set Up the Gateway Machine](#set-up-the-gateway-machine)
 
-  * [Install Dependencies](#install-dependencies)
-  * [Configure the Firewall](#configure-the-firewall)
+  * [Install OS](#install-os)
+  * [Create User](#create-user)
+  
 * [Deploy the Software](#deploy-the-software)
 
   * [Build the Deployment Assets](#build-the-deployment-assets)
@@ -16,40 +17,31 @@
   * [Check the Service Status](#check-the-service-status)
   * [View Live Logs](#view-live-logs)
   * [Restart the Service Manually](#restart-the-service-manually)
+  * [View Admin Panel](#view-admin-panel)
 
 ## Set Up the Gateway Machine
+
+### Install OS
 
 Install Debian GNU/Linux 12 (Bookworm) with GNOME 43.9:
 
 https://www.debian.org/releases/bookworm/debian-installer/
 
-### Install Dependencies
+### Create User
+Create user fbs-gateway during the install and add fbs-gateway to the sudoers file
 
-Update the package index and install the required dependencies:
-
-```bash
-sudo apt update
-
-sudo apt install --no-install-recommends \
-  lsof \
-  curl \
-  ca-certificates \
-  ufw
-```
-
-### Configure the Firewall
-
-Configure UFW to deny incoming traffic by default, allow outgoing traffic, and permit gateway connections only from the authorized FBS server IP address:
+Open a root shell using PolicyKit
 
 ```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow from 146.6.76.61 to any port 8081:8981 proto tcp
-sudo ufw enable
-sudo ufw status verbose
+pkexec bash
 ```
 
-Confirm that UFW is active and that TCP ports `8081` through `8981` are accessible only from `146.6.76.61`.
+Add fbs-gateway to the sudoer group
+```bash
+usermod -aG sudo fbs-gateway
+```
+
+Reboot the machine.
 
 ## Deploy the Software
 
@@ -149,3 +141,7 @@ After manually editing the configuration file, restart the service and verify th
 sudo systemctl restart fbs-interlock-gateway.service
 sudo systemctl status fbs-interlock-gateway.service --no-pager --full
 ```
+
+### View Admin Panel
+
+The admin panel can be found at http://127.0.0.1:18090
