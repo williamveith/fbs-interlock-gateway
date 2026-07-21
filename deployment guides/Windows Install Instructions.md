@@ -1,4 +1,18 @@
-# Windows Install Instructions
+# Windows Installation Instructions
+
+## Table of Contents
+
+- [Build the Deployment Assets](#build-the-deployment-assets)
+- [Copy the Deployment Directory to a USB Drive](#copy-the-deployment-directory-to-a-usb-drive)
+- [Copy the Deployment Directory to the Gateway Machine](#copy-the-deployment-directory-to-the-gateway-machine)
+- [Install the Gateway](#install-the-gateway)
+- [What the Installer Does](#what-the-installer-does)
+- [Verify That the Gateway Is Running](#verify-that-the-gateway-is-running)
+- [View Gateway Logs](#view-gateway-logs)
+- [Edit the Configuration](#edit-the-configuration)
+- [Restart the Gateway](#restart-the-gateway)
+- [View the Admin Panel](#view-the-admin-panel)
+- [Uninstall the Gateway](#uninstall-the-gateway)
 
 ## Build the Deployment Assets
 
@@ -9,80 +23,126 @@ make clean
 make build-windows-amd64
 ```
 
-This will generate the Windows deployment folder at:
+This generates the Windows deployment directory:
 
 ```text
 build/windows/
 ```
 
-The folder should contain:
-
-```text
-fbs-interlock-gateway.exe
-config.yaml
-start.bat
-```
-
-## Copy to USB Drive
-
-Copy the entire directory below onto a USB flash drive:
+The directory should contain:
 
 ```text
 build/windows/
-```
-
-Do not copy only the `.exe` file. The full directory is needed because it contains the application, config file, and startup script.
-
-## Install on the Windows Computer
-
-Plug the USB flash drive into the target Windows computer.
-
-Create the install directory:
-
-```text
-C:\FBS\fbs-interlock-gateway
-```
-
-Copy the full contents of the USB `windows` folder into:
-
-```text
-C:\FBS\fbs-interlock-gateway
-```
-
-The final folder should look like:
-
-```text
-C:\FBS\fbs-interlock-gateway\
 ├── fbs-interlock-gateway.exe
 ├── config.yaml
-└── start.bat
+├── install.bat
+├── install.ps1
+├── start.bat
+├── uninstall.bat
+├── uninstall.ps1
+└── Windows Install Instructions.md
 ```
 
-## Start the Gateway
+## Copy the Deployment Directory to a USB Drive
 
-Open the install folder:
+Copy the entire `build/windows/` directory to a USB flash drive.
+
+Do not copy only the application executable. The complete directory is
+required because it contains:
+
+- The application executable
+- The installer
+- The startup script
+- The uninstaller
+- The configuration file
+- These deployment instructions
+
+## Copy the Deployment Directory to the Gateway Machine
+
+Insert the USB flash drive into the Windows gateway machine.
+
+Copy the complete `windows` directory from the USB flash drive to the
+gateway machine. The deployment directory may be placed in the current
+user's `Downloads` directory.
+
+For example:
 
 ```text
-C:\FBS\fbs-interlock-gateway
+C:\Users\<username>\Downloads\windows
 ```
 
-Double-click:
+The installer will copy the required files into the permanent installation
+directory.
+
+## Install the Gateway
+
+Open the copied `windows` deployment directory.
+
+Right-click:
 
 ```text
-start.bat
+install.bat
 ```
 
-This will start the FBS Interlock Gateway from the install directory.
-
-## Verify That It Is Running
-
-Open a browser and go to:
+Select:
 
 ```text
-http://127.0.0.1:18090/api/status
+Run as administrator
 ```
 
-Or test from PowerShell:
+Approve the Windows User Account Control prompt when it appears.
+
+The installer will install and start the FBS Interlock Gateway.
+
+## What the Installer Does
+
+The installer performs the following actions:
+
+- Installs the gateway in:
+
+  ```text
+  C:\FBS\fbs-interlock-gateway
+  ```
+
+- Installs the active configuration file at:
+
+  ```text
+  C:\FBS\fbs-interlock-gateway\config.yaml
+  ```
+
+- Preserves an existing production configuration during reinstallation
+- Creates the gateway log directory
+- Adds a Windows Firewall rule for the gateway executable
+- Registers the gateway with Windows Task Scheduler
+- Runs the gateway as the Windows `SYSTEM` account
+- Starts the gateway automatically when Windows starts
+- Configures Windows to restart the task following an unexpected failure
+- Starts the gateway immediately after installation
+- Checks whether the admin API is responding
+
+## Verify That the Gateway Is Running
+
+Open PowerShell as an administrator.
+
+Check the scheduled task:
+
+```powershell
+Get-ScheduledTask -TaskName "FBS Interlock Gateway"
+```
+
+The task state should be:
+
+```text
+Running
+```
+
+View detailed task information:
+
+```powershell
+Get-ScheduledTaskInfo -TaskName "FBS Interlock Gateway"
+```
+
+Test the admin API:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:18090/api/status
@@ -96,46 +156,86 @@ Invoke-RestMethod http://127.0.0.1:8081/on
 Invoke-RestMethod http://127.0.0.1:8081/off
 ```
 
-## Edit the Config
+## View Gateway Logs
 
-The active config file is:
+The gateway log is located at:
+
+```text
+C:\FBS\fbs-interlock-gateway\logs\gateway.log
+```
+
+To follow the log from PowerShell:
+
+```powershell
+Get-Content `
+    "C:\FBS\fbs-interlock-gateway\logs\gateway.log" `
+    -Wait
+```
+
+Press `Ctrl+C` to stop following the log.
+
+## Edit the Configuration
+
+The active configuration file is:
 
 ```text
 C:\FBS\fbs-interlock-gateway\config.yaml
 ```
 
-After editing `config.yaml`, stop and restart the gateway.
+An existing production configuration file is preserved when the installer is
+run again.
 
-## Start Automatically on Login
+After manually editing `config.yaml`, restart the gateway.
 
-To start the gateway automatically when the Windows user logs in:
+## Restart the Gateway
 
-1. Press `Win + R`
-2. Type:
+Open PowerShell as an administrator and run:
 
-```text
-shell:startup
+```powershell
+Stop-ScheduledTask -TaskName "FBS Interlock Gateway"
+Start-ScheduledTask -TaskName "FBS Interlock Gateway"
 ```
 
-3. Press Enter
-4. Create a shortcut to:
+Verify that the gateway restarted:
 
-```text
-C:\FBS\fbs-interlock-gateway\start.bat
+```powershell
+Get-ScheduledTask -TaskName "FBS Interlock Gateway"
 ```
 
-Place the shortcut in the Startup folder.
+## View the Admin Panel
 
-The gateway will now start automatically when that Windows user logs in.
-
-## Notes
-
-This Windows deployment runs the gateway as a normal user process.
-
-For a more permanent unattended setup, use Windows Task Scheduler to start:
+The admin panel is available at:
 
 ```text
-C:\FBS\fbs-interlock-gateway\start.bat
+http://127.0.0.1:18090
 ```
 
-at system startup or user login.
+The admin status API is available at:
+
+```text
+http://127.0.0.1:18090/api/status
+```
+
+## Uninstall the Gateway
+
+Open the original Windows deployment directory.
+
+Right-click:
+
+```text
+uninstall.bat
+```
+
+Select:
+
+```text
+Run as administrator
+```
+
+The uninstaller will:
+
+- Stop the running gateway
+- Remove the scheduled task
+- Remove the Windows Firewall rule
+- Remove the installed application files
+- Preserve the production `config.yaml` file
