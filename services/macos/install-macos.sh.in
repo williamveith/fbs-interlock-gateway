@@ -1,0 +1,200 @@
+#!/bin/bash
+set -euo pipefail
+
+APP="@APP@"
+INSTALL_DIR="@MACOS_INSTALL_DIR@"
+CONFIG_DIR="@MACOS_CONFIG_DIR@"
+CONFIG_PATH="@MACOS_CONFIG_PATH@"
+LOG_DIR="@MACOS_LOG_DIR@"
+SERVICE_USER="@MACOS_SERVICE_USER@"
+SERVICE_GROUP="@MACOS_SERVICE_GROUP@"
+LAUNCHD_LABEL="@MACOS_LAUNCHD_LABEL@"
+PLIST_NAME="${LAUNCHD_LABEL}.plist"
+PLIST_PATH="/Library/LaunchDaemons/${PLIST_NAME}"
+ADMIN_STATUS_URL="http://127.0.0.1:18090/api/status"
+
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_SRC="${SOURCE_DIR}/${APP}"
+CONFIG_SRC="${SOURCE_DIR}/config.yaml"
+START_SRC="${SOURCE_DIR}/start.sh"
+PLIST_SRC="${SOURCE_DIR}/${PLIST_NAME}"
+FIREWALL_TOOL="/usr/libexec/ApplicationFirewall/socketfilterfw"
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "ERROR: This installer must be run on macOS."
+  exit 1
+fi
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "Administrator privileges are required."
+  exec sudo "$0" "$@"
+fi
+
+echo "Installing ${APP} from:"
+echo "  ${SOURCE_DIR}"
+echo
+
+require_file() {
+  local path="$1"
+  local description="$2"
+
+  if [[ ! -f "$path" ]]; then
+    echo "ERROR: Missing ${description}:"
+    echo "  ${path}"
+    exit 1
+  fi
+}
+
+record_exists() {
+  local record="$1"
+  dscl . -read "$record" >/dev/null 2>&1
+}
+
+find_unused_directory_id() {
+  local directory="$1"
+  local attribute="$2"
+  local candidate=499
+
+  while [[ "$candidate" -ge 400 ]]; do
+    if ! dscl . -search "$directory" "$attribute" "$candidate" 2>/dev/null | grep -q .; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    candidate=$((candidate - 1))
+  done
+
+  echo "ERROR: Could not find an unused macOS directory ID from 400 through 499." >&2
+  return 1
+}
+
+create_service_account() {
+  local service_gid=""
+  local service_uid=""
+
+  echo "Creating the service group and account when needed..."
+
+  if ! record_exists "/Groups/${SERVICE_GROUP}"; then
+    service_gid="$(find_unused_directory_id /Groups PrimaryGroupID)"
+
+    dscl . -create "/Groups/${SERVICE_GROUP}"
+    dscl . -create "/Groups/${SERVICE_GROUP}" PrimaryGroupID "$service_gid"
+    dscl . -create "/Groups/${SERVICE_GROUP}" RealName "FBS Interlock Gateway"
+    dscl . -create "/Groups/${SERVICE_GROUP}" Password "*"
+  fi
+
+  service_gid="$(dscl . -read "/Groups/${SERVICE_GROUP}" PrimaryGroupID | awk '{print $2}')"
+
+  if ! record_exists "/Users/${SERVICE_USER}"; then
+    service_uid="$(find_unused_directory_id /Users UniqueID)"
+
+    dscl . -create "/Users/${SERVICE_USER}"
+    dscl . -create "/Users/${SERVICE_USER}" UniqueID "$service_uid"
+    dscl . -create "/Users/${SERVICE_USER}" PrimaryGroupID "$service_gid"
+    dscl . -create "/Users/${SERVICE_USER}" RealName "FBS Interlock Gateway"
+    dscl . -create "/Users/${SERVICE_USER}" UserShell /usr/bin/false
+    dscl . -create "/Users/${SERVICE_USER}" NFSHomeDirectory /var/empty
+    dscl . -create "/Users/${SERVICE_USER}" IsHidden 1
+    dscl . -create "/Users/${SERVICE_USER}" Password "*"
+  fi
+}
+
+unload_existing_daemon() {
+  if launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+    echo "Stopping the existing LaunchDaemon..."
+    launchctl bootout system "$PLIST_PATH" >/dev/null 2>&1 || \
+      launchctl bootout "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+  fi
+}
+
+configure_application_firewall() {
+  if [[ ! -x "$FIREWALL_TOOL" ]]; then
+    echo "macOS Application Firewall command-line tool was not found; skipping firewall registration."
+    return
+  fi
+
+  echo "Registering the gateway with the macOS Application Firewall..."
+  "$FIREWALL_TOOL" --add "$INSTALL_DIR/$APP" >/dev/null 2>&1 || true
+  "$FIREWALL_TOOL" --unblockapp "$INSTALL_DIR/$APP" >/dev/null 2>&1 || true
+}
+
+require_file "$BIN_SRC" "application binary"
+require_file "$CONFIG_SRC" "config file"
+require_file "$START_SRC" "startup script"
+require_file "$PLIST_SRC" "LaunchDaemon property list"
+
+if ! plutil -lint "$PLIST_SRC" >/dev/null; then
+  echo "ERROR: The LaunchDaemon property list is invalid:"
+  echo "  $PLIST_SRC"
+  exit 1
+fi
+
+create_service_account
+unload_existing_daemon
+
+echo "Creating the application directory..."
+install -d -o root -g wheel -m 0755 "$INSTALL_DIR"
+
+echo "Installing the application binary and startup script..."
+install -o root -g wheel -m 0755 "$BIN_SRC" "$INSTALL_DIR/$APP"
+install -o root -g wheel -m 0755 "$START_SRC" "$INSTALL_DIR/start.sh"
+
+echo "Creating the configuration directory..."
+install -d -o root -g "$SERVICE_GROUP" -m 0750 "$CONFIG_DIR"
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  echo "Installing config.yaml..."
+  install -o root -g "$SERVICE_GROUP" -m 0640 "$CONFIG_SRC" "$CONFIG_PATH"
+else
+  echo "Existing config found; preserving:"
+  echo "  $CONFIG_PATH"
+  chown root:"$SERVICE_GROUP" "$CONFIG_PATH"
+  chmod 0640 "$CONFIG_PATH"
+fi
+
+echo "Creating the log directory..."
+install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$LOG_DIR"
+touch "$LOG_DIR/gateway.log" "$LOG_DIR/gateway-error.log"
+chown "$SERVICE_USER":"$SERVICE_GROUP" \
+  "$LOG_DIR/gateway.log" \
+  "$LOG_DIR/gateway-error.log"
+chmod 0640 "$LOG_DIR/gateway.log" "$LOG_DIR/gateway-error.log"
+
+echo "Installing the LaunchDaemon..."
+install -o root -g wheel -m 0644 "$PLIST_SRC" "$PLIST_PATH"
+plutil -lint "$PLIST_PATH" >/dev/null
+
+configure_application_firewall
+
+echo "Loading and starting the LaunchDaemon..."
+launchctl bootstrap system "$PLIST_PATH"
+launchctl enable "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+
+echo
+echo "Checking the admin API..."
+admin_ready=false
+for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if curl --fail --silent --show-error "$ADMIN_STATUS_URL" >/dev/null 2>&1; then
+    admin_ready=true
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$admin_ready" == true ]]; then
+  echo "Admin API is responding at:"
+  echo "  $ADMIN_STATUS_URL"
+else
+  echo "WARNING: The LaunchDaemon was loaded, but the admin API did not respond yet."
+  echo "Check the service and logs with:"
+  echo "  sudo launchctl print system/${LAUNCHD_LABEL}"
+  echo "  sudo tail -F '${LOG_DIR}/gateway.log' '${LOG_DIR}/gateway-error.log'"
+fi
+
+echo
+echo "Install complete."
+echo
+echo "Important firewall note:"
+echo "  The macOS Application Firewall grants access by application, not by source IP."
+echo "  Enforce the FBS-source-IP restriction separately at the host packet-filter,"
+echo "  network firewall, or application layer if this Mac will be production-facing."
