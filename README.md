@@ -2,57 +2,125 @@
 
 `fbs-interlock-gateway` is a Go service that lets the FBS interlock system control networked tool interlocks through a local gateway server.
 
-The gateway receives FBS HTTP interlock requests, maps each request to a configured tool port, communicates with the assigned Shelly relay/control box over Shelly HTTP RPC, and returns the simple JSON state response expected by FBS.
+The gateway receives FBS HTTP interlock requests, maps each request to a configured tool listener, communicates with the assigned Shelly relay or network interlock over HTTP RPC, and returns the simple JSON state response expected by FBS.
 
-This project is designed for internal facility deployment where FBS communicates only with the gateway, and the gateway communicates only with the configured Shelly devices.
+The project is intended for controlled facility deployments where FBS communicates with the gateway and the gateway communicates with configured interlock devices.
 
-## Current release: v2.5.0
+## Table of Contents
 
-v2.5.0 is a reliability, validation, and release-automation release. It keeps the established FBS-to-Shelly control path while adding automated tests, race-detector validation, cross-platform build checks, guarded GitHub releases, and substantial Admin UI reliability improvements.
+- [Capabilities](#capabilities)
+- [Safety and security model](#safety-and-security-model)
+  - [Platform firewall behavior](#platform-firewall-behavior)
+- [System architecture](#system-architecture)
+- [Repository layout](#repository-layout)
+- [FBS-facing behavior](#fbs-facing-behavior)
+  - [Endpoints](#endpoints)
+- [Gateway-to-Shelly communication](#gateway-to-shelly-communication)
+- [Shelly authentication helper](#shelly-authentication-helper)
+- [Admin UI](#admin-ui)
+  - [Admin server protections](#admin-server-protections)
+  - [Admin address flag](#admin-address-flag)
+  - [Remote access with an SSH tunnel](#remote-access-with-an-ssh-tunnel)
+- [Admin API](#admin-api)
+  - [GET /api/config](#get-apiconfig)
+  - [PUT /api/config](#put-apiconfig)
+  - [GET /api/status](#get-apistatus)
+  - [POST /api/restart](#post-apirestart)
+- [Configuration](#configuration)
+  - [Config fields](#config-fields)
+  - [Validation](#validation)
+- [Development and validation](#development-and-validation)
+- [Building deployment packages](#building-deployment-packages)
+  - [Linux](#linux)
+  - [Windows AMD64](#windows-amd64)
+  - [macOS Apple Silicon](#macos-apple-silicon)
+  - [macOS Intel](#macos-intel)
+  - [Generate template-derived files only](#generate-template-derived-files-only)
+- [Deployment build output](#deployment-build-output)
+  - [Linux](#linux-1)
+  - [Windows](#windows)
+  - [macOS ARM64](#macos-arm64)
+  - [macOS AMD64](#macos-amd64)
+- [Release binaries](#release-binaries)
+- [Service templates and installed layouts](#service-templates-and-installed-layouts)
+  - [Linux templates](#linux-templates)
+  - [Windows templates](#windows-templates)
+  - [macOS templates](#macos-templates)
+- [Automatic Linux updates](#automatic-linux-updates)
+- [Continuous integration](#continuous-integration)
+- [Release workflow](#release-workflow)
+- [Branch and pull-request workflow](#branch-and-pull-request-workflow)
+- [Local testing](#local-testing)
+- [Runtime behavior](#runtime-behavior)
+  - [Port ownership warning](#port-ownership-warning)
+  - [Configuration reload behavior](#configuration-reload-behavior)
+- [Logging](#logging)
+- [Repository safety](#repository-safety)
 
-Current capabilities include:
+## Capabilities
 
-- one gateway listener port per configured tool
+- one FBS-facing listener port per configured tool
 - FBS-compatible `/status`, `/on`, and `/off` endpoints
 - supported query-based on/off command formats
 - Shelly Gen2/Gen3 HTTP RPC control
 - optional Shelly HTTP Digest Authentication
-- interactive Shelly authentication setup script
-- embedded admin UI bound to localhost by default
-- concurrent live-status checks across configured Shelly devices
-- visible disconnected/error states for unreachable devices
-- atomic configuration writes with `.bak` backups
-- Debian/Linux systemd packaging
-- generated Linux installer and update service/timer
-- Linux AMD64 and ARM64 builds
-- Windows AMD64 packaging
-- macOS ARM64 development builds
-- GitHub Actions CI for pull requests and pushes to `main`
-- a guarded tag-and-release workflow
+- an interactive Shelly authentication setup script
+- an embedded Admin UI bound to localhost by default
+- concurrent live-status checks with bounded worker concurrency
+- visible disconnected and error states for unreachable devices
+- password masking and preservation in the Admin API
+- validated, atomic configuration writes with `.bak` backups
+- Linux AMD64 and ARM64 deployment packages
+- Windows AMD64 deployment packages
+- macOS ARM64 and AMD64 deployment packages
+- Linux systemd supervision and automatic update support
+- Windows Task Scheduler supervision and restart handling
+- macOS LaunchDaemon supervision
+- cross-platform build validation in GitHub Actions
+- GPG-signed release tags
+- SHA-256 checksums for release binaries
 - a unified `make verify` validation gate
 
-Existing v2.4.0 configuration files remain compatible with v2.5.0. No configuration migration is required.
+## Safety and security model
 
-## Production security model
-
-The deployed security model is layered:
+The gateway controls access signals, but it is not a substitute for hardware safety controls.
 
 ```text
-Official FBS source IP
-  -> allowed by Linux firewall
-  -> gateway tool port
-  -> gateway optionally authenticates to Shelly using Digest Auth
-  -> Shelly relay/control box changes output state
-  -> tool monitor / enable / interlock circuit changes state
+FBS server
+  -> host or network firewall
+  -> gateway tool listener
+  -> optional Shelly Digest Authentication
+  -> Shelly relay or network interlock
+  -> tool monitor / enable / interlock circuit
 ```
 
-The production deployment should deny inbound traffic by default. The only inbound gateway traffic allowed for tool control should come from the official FBS interlock source IP.
+Important operational rules:
 
-The gateway binary and generated installer do **not** configure UFW automatically. The firewall rules in this README are deployment-policy examples and must be applied and verified by the operator.
+- Hardware interlocks and fail-safe circuitry remain authoritative.
+- `defaults.safe_state_on_error` controls the state reported by software when a device cannot be reached. It does not prove the physical relay state.
+- Production gateway ports should be reachable only from the authorized FBS source.
+- Shelly credentials are stored locally in `config.yaml`.
+- The Admin UI should remain bound to a loopback address unless remote access is intentionally secured.
+- Real credentials and production mappings must not be committed to the repository.
 
-Shelly devices can use HTTP Digest Authentication. When authentication is enabled on a Shelly, direct RPC control requires valid Shelly credentials. The gateway stores those credentials locally in `config.yaml` and uses them only when communicating with the configured Shelly device.
+### Platform firewall behavior
 
-The admin UI binds to `127.0.0.1:18090` by default. This keeps configuration editing local to the gateway host unless an operator intentionally uses an SSH tunnel.
+The deployment mechanisms differ by operating system:
+
+| Platform | Installer behavior |
+| --- | --- |
+| Linux | Installs UFW when needed, sets default incoming traffic to deny, allows outgoing traffic, permits the configured FBS source IP to the configured gateway port range, and enables UFW. |
+| Windows | Adds an inbound Windows Firewall rule for the installed gateway executable. Apply additional network controls when source-IP restriction is required. |
+| macOS | Adds the executable to the macOS Application Firewall allow list. The Application Firewall works by application and is not equivalent to a source-IP and port-range rule. Use a network firewall, a reviewed `pf` rule, or an application-level allowlist when source restriction is required. |
+
+The Linux firewall values are generated from these Makefile variables:
+
+```make
+FBS_SOURCE_IP = <authorized-fbs-source>
+FBS_PORT_RANGE = 8081:8981
+```
+
+Review them before building a production deployment.
 
 ## System architecture
 
@@ -68,24 +136,26 @@ The admin UI binds to `127.0.0.1:18090` by default. This keeps configuration edi
                                                                                                  circuit changes state
 
    +------------------------+
-   |  Local-only admin UI   |
+   |  Local-only Admin UI   |
    | http://127.0.0.1:18090 |
    +------------------------+
                 |
                 v
-config.yaml editor / status view / restart request
+configuration editor / status view / restart request
 ```
 
 ## Repository layout
 
-v2.5.0 uses a modular Go layout:
-
 ```text
 cmd/fbs-interlock-gateway/
-  main.go                 application entry point and CLI flags
+  main.go
+    application entry point, CLI flags, version output, signal handling
 
 internal/admin/
-  embedded Admin UI and local Admin API
+  server.go
+  server_test.go
+  web/
+    embedded Admin UI and local Admin API
 
 internal/config/
   YAML loading, defaults, validation, atomic writes, and backups
@@ -102,29 +172,39 @@ internal/process/
 internal/shelly/
   Shelly RPC client and Digest Authentication
 
+services/linux/
+  systemd, installer, and updater templates
+
+services/windows/
+  installer, startup, and uninstaller templates
+
+services/macos/
+  installer, startup, uninstaller, and LaunchDaemon templates
+
+deployment guides/
+  platform-specific installation instructions
+
 .github/workflows/
   CI and guarded release automation
 ```
 
-## What the gateway does
+## FBS-facing behavior
 
-The gateway exposes one HTTP listener per configured tool/interlock. Each listener port represents one interlock target.
+The gateway exposes one HTTP listener per enabled tool. Each configured listener port represents one interlock target.
 
-Example path:
+Example request path:
 
 ```text
 FBS
   -> http://<gateway-host>:<tool-port>/on
   -> fbs-interlock-gateway
   -> http://<shelly-host>/rpc/Switch.Set?id=<switch-id>&on=true
-  -> Shelly relay output changes state
+  -> Shelly output changes state
 ```
 
-FBS only needs the gateway hostname and the assigned gateway port for each tool. Shelly hostnames, switch IDs, and authentication credentials live in the local gateway configuration.
+FBS only needs the gateway hostname and the assigned gateway port. Shelly hostnames, switch IDs, authentication credentials, and enable states remain in the local gateway configuration.
 
-## FBS-facing endpoints
-
-FBS sends HTTP requests to the gateway:
+### Endpoints
 
 ```text
 http://<gateway-host>:<port>/status
@@ -143,7 +223,7 @@ The gateway also accepts common query-based command formats:
 ?value=0
 ```
 
-Gateway responses are intentionally simple for FBS compatibility:
+Responses are intentionally simple for FBS compatibility:
 
 ```json
 {"Success":1,"State":1}
@@ -153,219 +233,141 @@ Gateway responses are intentionally simple for FBS compatibility:
 {"Success":1,"State":0}
 ```
 
-`State: 1` means the interlock output is on.
+`State: 1` means the reported interlock output is on.
 
-`State: 0` means the interlock output is off.
-
-> **Important:** `defaults.safe_state_on_error` controls the state reported to FBS and shown by the Admin API when the Shelly cannot be reached. It does not prove the physical state of an unreachable relay. Hardware interlocks and fail-safe circuitry must remain the authoritative safety mechanism.
+`State: 0` means the reported interlock output is off.
 
 ## Gateway-to-Shelly communication
 
-For status requests, the gateway asks the Shelly for its current output state:
+Status requests use:
 
 ```text
 http://<shelly-host>/rpc/Switch.GetStatus?id=<switch-id>
 ```
 
-For command requests, the gateway sets the Shelly output state:
+Command requests use:
 
 ```text
 http://<shelly-host>/rpc/Switch.Set?id=<switch-id>&on=true
 http://<shelly-host>/rpc/Switch.Set?id=<switch-id>&on=false
 ```
 
-When `username` and `password` are configured for a tool, the gateway uses Shelly HTTP Digest Authentication. The first request receives the Shelly authentication challenge, then the gateway retries with the correct Digest Authorization header.
+When a username and password are configured, the gateway responds to the Shelly authentication challenge and retries with an HTTP Digest Authorization header.
 
-When `username` and `password` are blank or `null`, the gateway uses unauthenticated Shelly RPC for devices that have not been configured with Shelly authentication.
+When credentials are blank or `null`, the gateway uses unauthenticated RPC.
 
-## Shelly authentication
+## Shelly authentication helper
 
-Shelly Gen2/Gen3 devices support local HTTP Digest Authentication. This project supports authenticated Shelly RPC while keeping the FBS-facing gateway response format unchanged.
-
-Authenticated tool config example:
-
-```yaml
-bind: "0.0.0.0"
-
-defaults:
-  timeout_ms: 800
-  safe_state_on_error: "off"
-
-tools:
-  - interlock_name: "EQU-EXAMPLE-TOOL-01"
-    ip: "shelly-device.example.local"
-    port: 8081
-    switch_id: 0
-    username: "admin"
-    password: "local-device-password"
-    enabled: true
-```
-
-Unauthenticated tool config example:
-
-```yaml
-tools:
-  - interlock_name: "EQU-EXAMPLE-TOOL-02"
-    ip: "shelly-device-2.example.local"
-    port: 8082
-    switch_id: 0
-    username: null
-    password: null
-    enabled: true
-```
-
-### Shelly auth setup script
-
-The repository includes an interactive helper script:
+The repository includes:
 
 ```text
 scripts/set-shelly-auth.sh
 ```
 
-The script prompts for:
-
-- Shelly host/IP
-- new Shelly auth password
-- current Shelly auth password, blank for devices with auth disabled or blank auth
-
-Run it with:
+Run it directly:
 
 ```bash
 chmod +x scripts/set-shelly-auth.sh
 ./scripts/set-shelly-auth.sh
 ```
 
-or through the Makefile target when present:
+or through Make:
 
 ```bash
 make shelly-auth
 ```
 
-The script performs this sequence:
+The helper:
 
-1. Reads Shelly device info from `/rpc/Shelly.GetDeviceInfo`.
-2. Extracts the Shelly realm/device ID.
-3. Computes the Shelly `ha1` value for the `admin` user.
-4. Calls `Shelly.SetAuth`.
-5. Verifies authenticated access with `Switch.GetStatus`.
-
-## Gateway firewall
-
-The Linux gateway uses UFW to restrict inbound traffic.
-
-Production rule model:
-
-```text
-Default incoming traffic: denied
-Default outgoing traffic: allowed
-Allowed inbound FBS traffic: [FBS IP Address] -> TCP ports 8081:8981
-```
-
-The FBS source IP is:
-
-```text
-[FBS IP Address]
-```
-
-The deployed gateway port range is:
-
-```text
-8081:8981/tcp
-```
-
-The wide port range is intentional. It reserves a large gateway tool-port block for future tool deployments without requiring repeated firewall changes.
-
-Production UFW command set:
-
-```bash
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow from [FBS IP Address] to any port 8081:8981 proto tcp
-sudo ufw enable
-sudo ufw status verbose
-```
-
-Expected UFW status pattern:
-
-```text
-Status: active
-Default: deny (incoming), allow (outgoing), disabled (routed)
-
-To              Action      From
---              ------      ----
-8081:8981/tcp   ALLOW IN    [FBS IP Address]
-```
-
-This firewall rule means users on the network cannot call gateway URLs such as:
-
-```text
-http://<gateway-host>:8082/on
-http://<gateway-host>:8082/off
-```
-
-Only the official FBS interlock source IP can reach the gateway tool ports.
+1. reads device information from `Shelly.GetDeviceInfo`
+2. obtains the Shelly authentication realm
+3. computes the `ha1` value for the `admin` account
+4. calls `Shelly.SetAuth`
+5. verifies authenticated access with `Switch.GetStatus`
 
 ## Admin UI
 
-The gateway includes a built-in web admin UI embedded into the Go binary with Go's `embed` package.
+The Admin UI is embedded in the Go executable with Go's `embed` package.
 
-Default admin UI address:
+Default address:
 
 ```text
 http://127.0.0.1:18090
 ```
 
-The deployed machine does not need a separate `web/` directory at runtime.
+No separate runtime `web/` directory is required.
 
-The Admin UI provides:
+The interface provides:
 
-- a live status table for all configured tools
-- Shelly connection and output status
-- disconnected/error reporting for unreachable Shelly devices
-- concurrent status checks, so a large device list is not checked sequentially
-- prevention of overlapping polling requests
-- visible errors when config or status requests fail
+- a live status table for configured tools
+- connected, disconnected, output, and error states
+- bounded concurrent status checks
+- paused polling when the page is not visible
+- prevention of overlapping requests
 - editable configuration fields
-- add-tool support
-- validated config saves
-- atomic config replacement and `config.yaml.bak` creation
+- automatic selection of the next available listener port
+- duplicate-name, duplicate-port, and field validation
+- add and delete tool controls
+- password-set indicators without returning stored passwords
+- explicit password replacement or clearing
+- notifications for loading, validation, save, and restart results
+- safe text rendering for names, addresses, and error messages
+- cache-disabled API requests
 - an automatic restart request after a successful save
-- HTML escaping for tool names, hostnames, and error text
-- cache-disabled requests for live API data
 
-Disabled tools remain visible in configuration/status data but are not contacted.
+Disabled tools remain visible in configuration and status data but are not contacted.
+
+### Admin server protections
+
+The Admin server includes:
+
+- explicit HTTP method handling
+- strict single-object JSON decoding
+- rejection of unknown JSON fields
+- a request body size limit
+- read, write, idle, header, and shutdown timeouts
+- bounded concurrent device-status requests
+- no-store headers for API responses
+- same-origin checks for state-changing requests
+- rejection of cross-site state-changing requests
+- `Content-Security-Policy`
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- restrictive referrer and permissions policies
+
+Keep the Admin UI on loopback whenever possible.
 
 ### Admin address flag
 
-Set the admin UI address explicitly:
+Set an explicit address:
 
 ```bash
-./fbs-interlock-gateway -config config.yaml -admin 127.0.0.1:18090
+./fbs-interlock-gateway \
+  -config config.yaml \
+  -admin 127.0.0.1:18090
 ```
 
-Disable the admin UI:
+Disable the Admin UI:
 
 ```bash
-./fbs-interlock-gateway -config config.yaml -admin ""
+./fbs-interlock-gateway \
+  -config config.yaml \
+  -admin ""
 ```
 
-### Remote admin access by SSH tunnel
-
-Keep the Admin UI bound to `127.0.0.1` and tunnel into it from a workstation:
+### Remote access with an SSH tunnel
 
 ```bash
 ssh -L 18090:127.0.0.1:18090 fbs-gateway@<gateway-host>
 ```
 
-Then open this on the workstation:
+Then open:
 
 ```text
 http://127.0.0.1:18090
 ```
 
 ## Admin API
-
-The admin UI uses local API endpoints:
 
 ```text
 GET  /api/config
@@ -376,17 +378,25 @@ POST /api/restart
 
 ### `GET /api/config`
 
-Returns the currently loaded config as JSON.
+Returns the loaded configuration without returning stored passwords.
+
+A tool with a stored password reports:
+
+```json
+{
+  "password_set": true
+}
+```
 
 ### `PUT /api/config`
 
-Accepts edited config as JSON, validates it, writes it back to `config.yaml`, and creates `config.yaml.bak` from the previous file when possible.
+Accepts edited configuration, validates it, preserves existing passwords unless replacement or clearing is explicitly requested, writes the file atomically, and creates `config.yaml.bak` from the previous file when possible.
 
-The save operation writes through a temporary file before renaming it into place.
+A successful response indicates that a restart is required.
 
 ### `GET /api/status`
 
-Returns live status information for configured tools:
+Returns live status information for all configured tools:
 
 ```json
 [
@@ -402,47 +412,27 @@ Returns live status information for configured tools:
 ]
 ```
 
-When an interlock cannot be reached, `connected` is `false` and the error message is included.
+When an enabled interlock cannot be reached, `connected` is `false`, the configured safe output is reported, and the error is included.
 
 ### `POST /api/restart`
 
-Requests a clean gateway restart after a config save.
-
-In production, the gateway exits and systemd restarts it according to the service restart policy. During local testing with `go run`, the process exits.
+Requests a clean process restart. The platform service supervisor starts the process again in an installed deployment.
 
 ## Configuration
 
-The service loads YAML configuration from the path provided with the `-config` flag.
+The service loads YAML from the path supplied with `-config`.
 
-When `-config` is omitted, the gateway looks for `config.yaml` in the same directory as the executable.
+When `-config` is omitted, the gateway looks for `config.yaml` beside the executable.
 
-The generated v2.5.0 systemd service uses:
-
-```text
--config /etc/fbs-interlock-gateway/config.yaml
-```
-
-The production executable is installed separately at:
-
-```text
-/opt/fbs-interlock-gateway/fbs-interlock-gateway
-```
-
-The generated installer creates `/etc/fbs-interlock-gateway`, installs the config with mode `0640`, and assigns it to the `fbs-gateway` service account. An existing production config is preserved during reinstall.
-
-`config.yaml`, `config.yaml.bak`, and the `build/` directory are excluded from Git.
-
-### Create a starter config
-
-Create a starter `config.yaml` with:
+Create a starter config:
 
 ```bash
 make init-config
 ```
 
-This target leaves an existing `config.yaml` unchanged.
+The target preserves an existing local `config.yaml`.
 
-Generated starter config:
+Starter structure:
 
 ```yaml
 bind: 0.0.0.0
@@ -461,7 +451,7 @@ tools:
     enabled:
 ```
 
-Safe example:
+Example:
 
 ```yaml
 bind: "0.0.0.0"
@@ -488,81 +478,69 @@ tools:
     enabled: true
 ```
 
-## Config fields
+### Config fields
 
-| Field                          | Purpose                                                                       |
-| ------------------------------ | ----------------------------------------------------------------------------- |
-| `bind`                         | Address the FBS-facing gateway listeners bind to. Use `0.0.0.0` to listen on all interfaces. |
-| `defaults.timeout_ms`          | HTTP timeout for interlock requests.                                          |
-| `defaults.safe_state_on_error` | State reported back to FBS when the interlock cannot be reached. Usually `off`. |
-| `tools[].interlock_name`       | Human-readable tool/interlock name used in logs and the admin UI.             |
-| `tools[].ip`                   | Hostname or IP address of the Shelly/network interlock.                       |
-| `tools[].port`                 | Gateway listener port for that FBS tool/interlock.                            |
-| `tools[].switch_id`            | Shelly switch/relay ID. For Shelly 1 Mini Gen3 this is usually `0`.           |
-| `tools[].username`             | Shelly RPC username. For Shelly Gen2/Gen3 this is usually `admin`.            |
-| `tools[].password`             | Shelly RPC password used by the gateway for Digest Auth.                      |
-| `tools[].enabled`              | Whether this gateway listener starts.                                         |
+| Field | Purpose |
+| --- | --- |
+| `bind` | Address used by FBS-facing listeners. Use `0.0.0.0` to listen on all interfaces. |
+| `defaults.timeout_ms` | HTTP timeout for interlock requests. |
+| `defaults.safe_state_on_error` | State reported when an interlock cannot be reached. Usually `off`. |
+| `tools[].interlock_name` | Tool or interlock name used in logs and the Admin UI. |
+| `tools[].ip` | Shelly or network-interlock hostname/IP. |
+| `tools[].port` | FBS-facing gateway listener port. |
+| `tools[].switch_id` | Shelly relay ID. This is commonly `0` for a single-output device. |
+| `tools[].username` | Optional Shelly RPC username. |
+| `tools[].password` | Optional Shelly RPC password used for Digest Authentication. |
+| `tools[].enabled` | Whether the gateway starts the listener and contacts the device. |
 
-## Config validation
+### Validation
 
-The admin API validates edited config before saving.
+Validation includes:
 
-Validation checks include:
+- required interlock names
+- required device addresses
+- listener ports within `8081` through `8981`
+- duplicate listener ports
+- valid switch IDs
+- valid defaults
 
-- missing `interlock_name`
-- missing `ip`
-- invalid ports
-- duplicate ports
-- invalid `switch_id`
-
-When validation fails, the config is not written.
+Invalid configuration is not written.
 
 ## Development and validation
 
-v2.5.0 requires Go 1.22.
+Use the Go version declared in `go.mod`.
 
-Create a local configuration before running deployment build targets because those targets copy `config.yaml` into the build output:
+Create a local configuration before deployment builds:
 
 ```bash
 make init-config
 ```
 
-Format source files:
+Common targets:
 
 ```bash
 make fmt
-```
-
-Run the normal test suite:
-
-```bash
 make test
-```
-
-Run the race-detector test suite:
-
-```bash
 make test-race
-```
-
-Run the complete v2.5.0 validation gate:
-
-```bash
+make vet
 make verify
 ```
 
-`make verify` performs:
+`make verify` runs:
 
 1. `gofmt` verification without modifying source files
-2. `go.mod` and `go.sum` consistency validation
+2. `go.mod` and `go.sum` consistency checks
 3. `go vet`
 4. all Go tests under the race detector
-5. shell-script syntax validation
-6. Linux AMD64 build validation
-7. Linux ARM64 build validation
-8. Windows AMD64 build validation
+5. Linux and macOS shell-template syntax checks
+6. macOS property-list validation when `plutil` or Python's `plistlib` is available
+7. Linux AMD64 build validation
+8. Linux ARM64 build validation
+9. Windows AMD64 build validation
+10. macOS ARM64 build validation
+11. macOS AMD64 build validation
 
-The individual validation targets are:
+Individual validation targets:
 
 ```bash
 make fmt-check
@@ -573,350 +551,444 @@ make scripts-check
 make build-check
 ```
 
-## Building
+## Building deployment packages
 
-Build for macOS Apple Silicon:
-
-```bash
-make build-mac
-```
-
-Build for Linux ARM64:
-
-```bash
-make build-linux-arm64
-```
-
-Build for Linux AMD64:
+### Linux
 
 ```bash
 make build-linux-amd64
+make build-linux-arm64
 ```
 
-Build for Windows AMD64:
+Both commands generate `build/linux/`. Run only the architecture target needed for the deployment machine after `make clean`.
+
+### Windows AMD64
 
 ```bash
 make build-windows-amd64
 ```
 
-Build all release binaries and checksums through the full validation gate:
+### macOS Apple Silicon
 
 ```bash
-make release VERSION=v2.5.0
+make build-darwin-arm64
 ```
 
-Build individual release assets without the aggregate release target:
+`make build` and `make build-mac` are aliases for the Apple Silicon deployment build.
+
+### macOS Intel
 
 ```bash
-make release-linux-amd64 VERSION=v2.5.0
-make release-linux-arm64 VERSION=v2.5.0
-make release-windows-amd64 VERSION=v2.5.0
+make build-darwin-amd64
 ```
 
-Clean build outputs:
+### Generate template-derived files only
 
 ```bash
-make clean
+make windows-deployment-files
+make macos-arm64-deployment-files
+make macos-amd64-deployment-files
+make macos-deployment-files
 ```
 
-Display embedded build metadata:
+## Deployment build output
 
-```bash
-./build/darwin/fbs-interlock-gateway -version
-```
-
-A release binary prints output in this form:
-
-```text
-fbs-interlock-gateway version=v2.5.0 commit=<commit> date=<UTC-build-time>
-```
-
-## Build output
-
-### macOS ARM64 development build
-
-```text
-build/darwin/
-  fbs-interlock-gateway
-  config.yaml
-```
-
-### Linux deployment build
+### Linux
 
 ```text
 build/linux/
-  fbs-interlock-gateway
-  config.yaml
-  Linux Install Instructions.md
-  fbs-interlock-gateway.service
-  install.sh
-  update.sh
-  fbs-interlock-gateway-update.service
-  fbs-interlock-gateway-update.timer
+├── fbs-interlock-gateway
+├── config.yaml
+├── fbs-interlock-gateway.service
+├── install.sh
+├── update.sh
+├── fbs-interlock-gateway-update.service
+├── fbs-interlock-gateway-update.timer
+└── Linux Install Instructions.md
 ```
 
-### Windows AMD64 deployment build
+### Windows
 
 ```text
 build/windows/
-  fbs-interlock-gateway.exe
-  config.yaml
-  Windows Install Instructions.md
-  start.bat
+├── fbs-interlock-gateway.exe
+├── config.yaml
+├── install.bat
+├── install.ps1
+├── start.bat
+├── uninstall.bat
+├── uninstall.ps1
+└── Windows Install Instructions.md
 ```
 
-### Release assets
+### macOS ARM64
 
-Release targets place binaries and SHA-256 checksum files under:
+```text
+build/darwin/arm64/
+├── fbs-interlock-gateway
+├── config.yaml
+├── install.sh
+├── start.sh
+├── uninstall.sh
+├── com.williamveith.fbs-interlock-gateway.plist
+└── macOS Install Instructions.md
+```
+
+### macOS AMD64
+
+```text
+build/darwin/amd64/
+├── fbs-interlock-gateway
+├── config.yaml
+├── install.sh
+├── start.sh
+├── uninstall.sh
+├── com.williamveith.fbs-interlock-gateway.plist
+└── macOS Install Instructions.md
+```
+
+Generated deployment files are build artifacts. Edit their templates or Makefile variables instead of editing generated copies.
+
+## Release binaries
+
+Build all release binaries and checksums through the validation gate:
+
+```bash
+make release VERSION=<version>
+```
+
+Build individual assets:
+
+```bash
+make release-linux-amd64 VERSION=<version>
+make release-linux-arm64 VERSION=<version>
+make release-windows-amd64 VERSION=<version>
+make release-darwin-arm64 VERSION=<version>
+make release-darwin-amd64 VERSION=<version>
+```
+
+Release files are written to:
 
 ```text
 build/release/
+├── fbs-interlock-gateway-linux-amd64
+├── fbs-interlock-gateway-linux-amd64.sha256
+├── fbs-interlock-gateway-linux-arm64
+├── fbs-interlock-gateway-linux-arm64.sha256
+├── fbs-interlock-gateway-windows-amd64.exe
+├── fbs-interlock-gateway-windows-amd64.exe.sha256
+├── fbs-interlock-gateway-darwin-arm64
+├── fbs-interlock-gateway-darwin-arm64.sha256
+├── fbs-interlock-gateway-darwin-amd64
+└── fbs-interlock-gateway-darwin-amd64.sha256
 ```
 
-Expected release output:
+Display embedded metadata:
+
+```bash
+./build/release/fbs-interlock-gateway-linux-amd64 -version
+```
+
+Output format:
 
 ```text
-build/release/
-  fbs-interlock-gateway-linux-amd64
-  fbs-interlock-gateway-linux-amd64.sha256
-  fbs-interlock-gateway-linux-arm64
-  fbs-interlock-gateway-linux-arm64.sha256
-  fbs-interlock-gateway-windows-amd64.exe
-  fbs-interlock-gateway-windows-amd64.exe.sha256
+fbs-interlock-gateway version=<version> commit=<commit> date=<UTC-build-time>
 ```
 
-## Service and update templates
+## Service templates and installed layouts
 
-Deployment files are generated from templates in `services/`.
-
-Templates:
+### Linux templates
 
 ```text
-services/app.service.in
-services/install-linux.sh.in
-services/update-linux.sh.in
-services/update.service.in
-services/update.timer.in
-services/start-windows.bat.in
+services/linux/
+├── app.service.in
+├── install-linux.sh.in
+├── update-linux.sh.in
+├── update.service.in
+└── update.timer.in
 ```
 
-Generated Linux files:
+Installed layout:
 
 ```text
-build/linux/fbs-interlock-gateway.service
-build/linux/install.sh
-build/linux/update.sh
-build/linux/fbs-interlock-gateway-update.service
-build/linux/fbs-interlock-gateway-update.timer
+/opt/fbs-interlock-gateway/
+├── fbs-interlock-gateway
+└── update.sh
+
+/etc/fbs-interlock-gateway/
+├── config.yaml
+└── config.yaml.bak
+
+/etc/systemd/system/
+├── fbs-interlock-gateway.service
+├── fbs-interlock-gateway-update.service
+└── fbs-interlock-gateway-update.timer
 ```
 
-Generated Windows helper:
+The Linux installer:
+
+- verifies or installs `lsof`, `curl`, `ca-certificates`, and `ufw`
+- configures and enables UFW
+- creates the service user and group when needed
+- installs the executable and service files
+- preserves an existing production config
+- applies restrictive ownership and permissions
+- enables and starts the gateway
+- enables the update timer when updater files are present
+
+The systemd service:
+
+- starts after the network is online
+- runs under the configured service account
+- writes logs to journald
+- restarts after exits
+- waits two seconds between starts
+- limits rapid restart attempts
+- applies `NoNewPrivileges=true`
+
+### Windows templates
 
 ```text
-build/windows/start.bat
+services/windows/
+├── install.bat.in
+├── install.ps1.in
+├── start.bat.in
+├── uninstall.bat.in
+└── uninstall.ps1.in
 ```
 
-Generated files are build artifacts. Edit the templates or Makefile variables rather than editing generated copies.
-
-Current defaults:
-
-| Setting | Value |
-| --- | --- |
-| Application name | `fbs-interlock-gateway` |
-| Command package | `./cmd/fbs-interlock-gateway` |
-| Linux binary directory | `/opt/fbs-interlock-gateway` |
-| Linux config directory | `/etc/fbs-interlock-gateway` |
-| Linux config path | `/etc/fbs-interlock-gateway/config.yaml` |
-| Linux service user/group | `fbs-gateway` |
-| Windows install directory used by `start.bat` | `C:\FBS\fbs-interlock-gateway` |
-
-## Continuous integration and releases
-
-All changes should reach `main` through a short-lived feature branch and pull request. The `main` branch should remain releasable at all times.
-
-### Create a feature branch
-
-Start from an up-to-date local copy of `main`:
-
-```bash
-git switch main
-git pull --ff-only origin main
-```
-
-Create a branch whose name describes the work:
-
-```bash
-git switch -c feature/<short-description>
-```
-
-Common branch prefixes include:
+Installed layout:
 
 ```text
-feature/   new functionality
-fix/       bug fixes
-docs/      documentation-only changes
-refactor/  internal restructuring without an intended behavior change
+C:\FBS\fbs-interlock-gateway\
+├── fbs-interlock-gateway.exe
+├── config.yaml
+├── start.bat
+└── logs\
+    └── gateway.log
 ```
 
-Examples:
+The Windows installer:
 
-```bash
-git switch -c feature/add-health-endpoint
-git switch -c fix/admin-status-timeout
-git switch -c docs/release-process
-```
+- elevates through User Account Control
+- copies the executable and startup wrapper
+- preserves an existing production config
+- creates the log directory
+- adds a Windows Firewall rule
+- registers a Task Scheduler job
+- runs the task as `SYSTEM`
+- starts the gateway at boot
+- starts the gateway immediately
+- checks the Admin API
 
-Make the changes, format the source, and run the same validation gate used by CI:
+The startup wrapper:
 
-```bash
-make fmt
-make verify
-```
+- passes the installed config path explicitly
+- restarts the executable after two seconds
+- limits rapid restart attempts
+- writes process output and restart events to `gateway.log`
 
-Review the changes before committing:
+The uninstaller removes the task, firewall rule, and installed application files while preserving the production config.
 
-```bash
-git status
-git diff
-```
-
-Stage and commit the work:
-
-```bash
-git add -A
-git commit -S -m "Describe the change"
-```
-
-`-S` signs the commit with the configured Git signing key. It may be omitted when `commit.gpgsign=true` is already enabled in the local Git configuration.
-
-### Push the feature branch and open a pull request
-
-Push the branch to GitHub and configure its upstream tracking branch:
-
-```bash
-git push --set-upstream origin feature/<short-description>
-```
-
-Open a pull request into `main` through GitHub, or with GitHub CLI:
-
-```bash
-gh pr create \
-  --base main \
-  --head feature/<short-description> \
-  --fill
-```
-
-The CI workflow runs automatically for every pull request. It:
-
-1. installs the Go version declared in `go.mod`
-2. runs `make verify`
-3. smoke-tests the Linux AMD64 binary with `-version`
-4. inspects the generated Linux and Windows binary formats
-
-If review or CI requires another change, commit it to the same feature branch and push again:
-
-```bash
-git add -A
-git commit -S -m "Address review feedback"
-git push
-```
-
-The pull request updates automatically and CI runs again.
-
-### Merge the feature branch into `main`
-
-Merge the pull request only after required review is complete and CI passes. Do not bypass the pull-request workflow by pushing feature work directly to `main`.
-
-After the pull request is merged, update the local repository and remove stale remote-tracking branches:
-
-```bash
-git switch main
-git pull --ff-only origin main
-git fetch --prune
-```
-
-Delete the local feature branch after confirming that the pull request was merged:
-
-```bash
-git branch -d feature/<short-description>
-```
-
-A push to `main` triggers CI again, providing a final validation of the merged result.
-
-### Create a release
-
-Releases are created by the manually triggered **Validate, Tag, and Release** GitHub Actions workflow. Do not create or push the release tag manually; the workflow creates the signed tag at the exact `main` commit that it validates and packages.
-
-Before starting a release:
-
-1. Merge all intended changes into `main`.
-2. Confirm the pull-request checks passed.
-3. Confirm `main` contains the exact commit that should be released.
-4. Choose a new semantic version that does not already exist.
-
-Version examples:
+### macOS templates
 
 ```text
-v2.5.1       patch release
-v2.6.0       minor release
-v3.0.0       major release
-v2.6.0-rc.1  prerelease candidate
+services/macos/
+├── com.williamveith.fbs-interlock-gateway.plist.in
+├── install-macos.sh.in
+├── start.sh.in
+└── uninstall-macos.sh.in
 ```
 
-To create the release through GitHub:
+Installed layout:
 
-1. Open the repository on GitHub.
-2. Select **Actions**.
-3. Select **Validate, Tag, and Release**.
-4. Select **Run workflow**.
-5. Choose the `main` branch.
-6. Enter the version, including the leading `v`, such as `v2.6.0`.
-7. Select **Run workflow**.
-8. Approve the `release` environment when an approval rule is configured.
+```text
+/usr/local/libexec/fbs-interlock-gateway/
+├── fbs-interlock-gateway
+└── start.sh
 
-The workflow can also be started with GitHub CLI:
+/Library/Application Support/fbs-interlock-gateway/
+└── config.yaml
+
+/Library/LaunchDaemons/
+└── com.williamveith.fbs-interlock-gateway.plist
+
+/Library/Logs/fbs-interlock-gateway/
+├── gateway.log
+└── gateway-error.log
+```
+
+The macOS installer:
+
+- verifies it is running on macOS
+- validates the LaunchDaemon property list
+- creates a hidden non-login service account when needed
+- copies the executable and startup wrapper
+- preserves an existing production config
+- creates the log files
+- installs and starts a system LaunchDaemon
+- registers the executable with the Application Firewall
+- checks the Admin API
+
+The LaunchDaemon:
+
+- starts before a user signs in
+- runs under the dedicated service account
+- keeps the gateway running
+- throttles rapid restarts
+- writes stdout and stderr to separate log files
+
+The uninstaller unloads the LaunchDaemon and removes installed executable files while preserving configuration and logs.
+
+Detailed procedures are in:
+
+```text
+deployment guides/Linux Install Instructions.md
+deployment guides/Windows Install Instructions.md
+deployment guides/macOS Install Instructions.md
+```
+
+## Automatic Linux updates
+
+The generated Linux update timer runs after boot and then periodically.
+
+The updater:
+
+1. selects the matching Linux release asset
+2. downloads the executable and checksum
+3. verifies SHA-256
+4. backs up the installed executable
+5. installs the new executable
+6. restarts the service
+7. rolls back when the service fails to start
+
+Inspect or disable the timer:
 
 ```bash
-gh workflow run release.yml \
-  --ref main \
-  -f version=v2.6.0
+sudo systemctl status fbs-interlock-gateway-update.timer
+sudo systemctl list-timers fbs-interlock-gateway-update.timer
+sudo systemctl disable --now fbs-interlock-gateway-update.timer
 ```
 
-The release workflow:
+Run an update manually:
+
+```bash
+sudo /opt/fbs-interlock-gateway/update.sh
+```
+
+## Continuous integration
+
+The CI workflow runs for pull requests and pushes to `main`.
+
+It:
+
+1. checks out the repository
+2. installs the Go version declared in `go.mod`
+3. runs `make verify`
+4. executes the Linux AMD64 binary with `-version`
+5. verifies the generated formats for:
+   - Linux AMD64
+   - Linux ARM64
+   - Windows AMD64
+   - macOS ARM64
+   - macOS AMD64
+
+The macOS and Windows binaries are cross-compiled and format-checked on the Linux runner. They are not executed by that runner.
+
+## Release workflow
+
+Releases are created through the manually triggered **Validate, Tag, and Release** GitHub Actions workflow.
+
+The workflow:
 
 1. requires the `main` branch
-2. checks out the complete repository history and tags
+2. checks out complete Git history and tags
 3. imports the protected release-signing GPG key
-4. validates the requested version format
-5. rejects a version whose tag already exists
+4. validates the requested semantic version
+5. rejects an existing tag
 6. runs `make verify`
-7. builds the Linux AMD64, Linux ARM64, and Windows AMD64 release assets
-8. verifies asset existence and SHA-256 checksums
-9. verifies binary formats and architectures
-10. verifies embedded version and commit metadata
-11. confirms that the build did not modify tracked files
-12. creates and locally verifies a GPG-signed annotated tag
-13. pushes the signed tag to GitHub
-14. creates a GitHub release with generated release notes and the validated assets
+7. builds all supported release binaries
+8. verifies asset existence
+9. verifies every SHA-256 checksum
+10. verifies binary formats and architectures
+11. verifies embedded version and commit metadata using the Linux AMD64 binary
+12. confirms that the build did not modify tracked files
+13. creates and locally verifies a GPG-signed annotated tag
+14. pushes the signed tag
+15. creates a GitHub release with generated notes and all validated assets
 
-The `release` GitHub environment must contain these secrets:
+Required release-environment secrets:
 
 ```text
 GPG_PRIVATE_KEY
 GPG_PASSPHRASE
 ```
 
-The matching public GPG key must also be registered with the GitHub account associated with the tagger email so GitHub can display the tag signature as verified.
+Start the workflow with GitHub CLI:
 
-After the workflow succeeds, verify the release and signed tag locally:
+```bash
+gh workflow run release.yml \
+  --ref main \
+  -f version=<version>
+```
+
+After it succeeds:
 
 ```bash
 git fetch origin --tags
-git tag -v v2.6.0
-gh release view v2.6.0
+git tag -v <version>
+gh release view <version>
 ```
 
-Replace `v2.6.0` with the version that was released.
+## Branch and pull-request workflow
+
+Start from current `main`:
+
+```bash
+git switch main
+git pull --ff-only origin main
+```
+
+Create a short-lived branch:
+
+```bash
+git switch -c feature/<description>
+```
+
+Validate before committing:
+
+```bash
+make fmt
+make verify
+git status
+git diff
+```
+
+Commit and push:
+
+```bash
+git add -A
+git commit -S -m "Describe the change"
+git push --set-upstream origin feature/<description>
+```
+
+Open a pull request:
+
+```bash
+gh pr create \
+  --base main \
+  --head feature/<description> \
+  --fill
+```
+
+After merging:
+
+```bash
+git switch main
+git pull --ff-only origin main
+git fetch --prune
+git branch -d feature/<description>
+```
 
 ## Local testing
 
@@ -926,19 +998,20 @@ Create a local config:
 make init-config
 ```
 
-Run through the Makefile:
+Run through Make:
 
 ```bash
 make run
 ```
 
-Equivalent explicit command:
+Equivalent command:
 
 ```bash
-go run ./cmd/fbs-interlock-gateway -config ./config.yaml
+go run ./cmd/fbs-interlock-gateway \
+  -config ./config.yaml
 ```
 
-Run with an explicit Admin UI address:
+Run with an explicit Admin address:
 
 ```bash
 go run ./cmd/fbs-interlock-gateway \
@@ -946,16 +1019,10 @@ go run ./cmd/fbs-interlock-gateway \
   -admin 127.0.0.1:18090
 ```
 
-Print version metadata and exit:
+Print build metadata:
 
 ```bash
 go run ./cmd/fbs-interlock-gateway -version
-```
-
-Open the Admin UI:
-
-```text
-http://127.0.0.1:18090
 ```
 
 Test the Admin API:
@@ -973,7 +1040,7 @@ curl "http://<shelly-host>/rpc/Switch.Set?id=<switch-id>&on=true"
 curl "http://<shelly-host>/rpc/Switch.Set?id=<switch-id>&on=false"
 ```
 
-Test an authenticated Shelly directly:
+Test an authenticated Shelly:
 
 ```bash
 curl --anyauth -u "admin:<password>" \
@@ -988,185 +1055,58 @@ curl "http://<gateway-host>:<port>/on"
 curl "http://<gateway-host>:<port>/off"
 ```
 
-Expected gateway response:
-
-```json
-{"Success":1,"State":1}
-```
-
-or:
-
-```json
-{"Success":1,"State":0}
-```
-
-### Local restart testing on macOS
-
-The Admin UI can request a restart after saving config. Under systemd, the service restart policy starts the process again. During `go run`, the process exits.
-
-To simulate production restart behavior locally:
-
-```bash
-while true; do
-  go run ./cmd/fbs-interlock-gateway -config ./config.yaml
-  echo "gateway exited; restarting in 2 seconds..."
-  sleep 2
-done
-```
-
-## Deployment on Debian/Linux
-
-Build for the deployment architecture:
-
-```bash
-make build-linux-amd64
-```
-
-or:
-
-```bash
-make build-linux-arm64
-```
-
-Copy the complete generated `build/linux/` directory to the deployment machine and run:
-
-```bash
-cd build/linux
-sudo ./install.sh
-```
-
-The installer can also request administrator privileges through `pkexec` when available.
-
-### Installed layout
-
-```text
-/opt/fbs-interlock-gateway/
-  fbs-interlock-gateway
-  update.sh
-
-/etc/fbs-interlock-gateway/
-  config.yaml
-  config.yaml.bak        created after a successful Admin UI save when possible
-
-/etc/systemd/system/
-  fbs-interlock-gateway.service
-  fbs-interlock-gateway-update.service
-  fbs-interlock-gateway-update.timer
-```
-
-The installer:
-
-- creates the `fbs-gateway` system user and group when needed
-- installs the binary under `/opt/fbs-interlock-gateway`
-- creates `/etc/fbs-interlock-gateway`
-- preserves an existing production config
-- applies restrictive config ownership and permissions
-- installs and enables the main systemd service
-- installs and enables the update timer when its generated files are present
-- restarts the gateway service
-
-Check the service:
-
-```bash
-sudo systemctl status fbs-interlock-gateway.service --no-pager --full
-sudo systemctl is-active fbs-interlock-gateway.service
-sudo journalctl -u fbs-interlock-gateway.service -f
-```
-
-### Automatic update behavior
-
-The generated update timer runs five minutes after boot and then hourly. It downloads the latest matching Linux release asset and checksum, verifies SHA-256, backs up the installed binary, installs the new binary, and rolls back when the service fails to start.
-
-Inspect the timer:
-
-```bash
-sudo systemctl status fbs-interlock-gateway-update.timer
-sudo systemctl list-timers fbs-interlock-gateway-update.timer
-```
-
-Disable automatic updates when releases must be approved manually:
-
-```bash
-sudo systemctl disable --now fbs-interlock-gateway-update.timer
-```
-
-Run an update manually:
-
-```bash
-sudo /opt/fbs-interlock-gateway/update.sh
-```
-
-## Deployment on Windows AMD64
-
-Build the Windows package:
-
-```bash
-make build-windows-amd64
-```
-
-Copy the contents of `build/windows/` to:
-
-```text
-C:\FBS\fbs-interlock-gateway
-```
-
-Edit the copied `config.yaml`, then launch:
-
-```text
-start.bat
-```
-
-The generated batch file starts `fbs-interlock-gateway.exe` minimized. Because no `-config` argument is supplied, the executable loads `config.yaml` from the same directory.
-
 ## Runtime behavior
 
 On startup, the gateway:
 
 1. parses `-config`, `-admin`, and `-version`
 2. loads configuration from the explicit path or beside the executable
-3. applies default values for omitted optional fields
+3. applies defaults
 4. validates enabled tools
-5. starts the local Admin UI unless disabled
-6. starts one HTTP server per enabled tool
-7. maps each gateway port to one configured Shelly/network interlock
+5. starts the Admin server unless disabled
+6. starts one FBS-facing HTTP listener per enabled tool
+7. maps each gateway port to one configured interlock
 8. logs inbound FBS requests and outbound responses
 9. authenticates to Shelly devices when credentials are configured
-10. reports the configured safe state when a Shelly request fails
-11. shuts down cleanly on interrupt, SIGTERM, Admin UI restart request, or server error
+10. reports the configured safe state when a device request fails
+11. shuts down cleanly on interrupt, termination, Admin restart request, or server error
 
-Disabled tools are skipped during FBS listener startup. The Admin status API still includes them but does not contact them.
+Disabled tools do not receive FBS listeners and are not contacted by status polling.
 
 ### Port ownership warning
 
-Before starting each enabled tool listener, v2.5.0 attempts to clear any process already listening on that configured port. Use dedicated gateway ports and verify that no unrelated service is assigned to them.
+Before starting an enabled listener, the gateway may clear a process already using that configured port. Use dedicated gateway ports and confirm that unrelated services do not use the configured range.
 
 ### Configuration reload behavior
 
-A successful Admin UI save updates the stored configuration atomically and returns `restart_required: true`. The UI then requests a process restart so that listener ports and runtime clients are rebuilt from the new configuration.
+A successful Admin UI save writes the updated configuration and requests a process restart. The installed platform supervisor rebuilds runtime listeners and clients by starting the process again.
 
 ## Logging
 
-Incoming FBS requests are logged with:
+Gateway request logs use:
 
 ```text
 FBS_IN
-```
-
-Outgoing FBS responses are logged with:
-
-```text
 FBS_OUT
 ```
 
-Systemd logs:
+Platform logs:
 
-```bash
-journalctl -u fbs-interlock-gateway.service -f
+```text
+Linux:
+  journalctl -u fbs-interlock-gateway.service -f
+
+Windows:
+  C:\FBS\fbs-interlock-gateway\logs\gateway.log
+
+macOS:
+  /Library/Logs/fbs-interlock-gateway/gateway.log
+  /Library/Logs/fbs-interlock-gateway/gateway-error.log
 ```
 
 ## Repository safety
 
-Ignored local deployment files:
+Ignored local artifacts:
 
 ```gitignore
 build
@@ -1174,25 +1114,4 @@ config.yaml
 config.yaml.bak
 ```
 
-Committed repository content includes source code, templates, setup helpers, and documentation. Local deployment configuration remains on the deployment machine.
-
-## Operational notes
-
-- One gateway process can manage multiple interlocks.
-- Each enabled interlock gets its own gateway listener port.
-- Supported FBS paths are `/status`, `/on`, and `/off`.
-- Query-based on/off command formats remain supported.
-- FBS communicates only with the gateway.
-- The gateway communicates with each Shelly/network interlock using HTTP RPC.
-- Authenticated Shelly devices use HTTP Digest Authentication.
-- The UFW rule shown in this README is an operator-managed deployment control; it is not installed automatically.
-- Real deployment mappings and Shelly credentials live in local `config.yaml`.
-- Linux production config lives at `/etc/fbs-interlock-gateway/config.yaml`.
-- The web UI is embedded into the binary.
-- The Admin UI defaults to `127.0.0.1:18090`.
-- Admin status checks run concurrently in v2.5.0.
-- Unreachable devices appear as disconnected with an error and the configured reported safe state.
-- The generated Linux installer enables the update timer when its files are included.
-- `make verify` is the aggregate validation gate used by CI and release builds.
-- Release assets support Linux AMD64, Linux ARM64, and Windows AMD64.
-- macOS ARM64 is provided as a development build target.
+Committed content includes source code, tests, service templates, setup helpers, workflows, and documentation. Production configuration remains on the deployment machine.
