@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+
+APP="@APP@"
+INSTALL_DIR="@MACOS_INSTALL_DIR@"
+CONFIG_PATH="@MACOS_CONFIG_PATH@"
+LOG_DIR="@MACOS_LOG_DIR@"
+LAUNCHD_LABEL="@MACOS_LAUNCHD_LABEL@"
+PLIST_PATH="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+FIREWALL_TOOL="/usr/libexec/ApplicationFirewall/socketfilterfw"
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "ERROR: This uninstaller must be run on macOS."
+  exit 1
+fi
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "Administrator privileges are required."
+  exec sudo "$0" "$@"
+fi
+
+echo "Stopping and unloading ${LAUNCHD_LABEL}..."
+if launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+  launchctl bootout system "$PLIST_PATH" >/dev/null 2>&1 || \
+    launchctl bootout "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+fi
+
+if [[ -x "$FIREWALL_TOOL" && -f "$INSTALL_DIR/$APP" ]]; then
+  echo "Removing the gateway from the macOS Application Firewall list..."
+  "$FIREWALL_TOOL" --remove "$INSTALL_DIR/$APP" >/dev/null 2>&1 || true
+fi
+
+echo "Removing the LaunchDaemon and installed executable files..."
+rm -f "$PLIST_PATH"
+rm -rf "$INSTALL_DIR"
+
+echo
+echo "Uninstall complete."
+echo "The production configuration was preserved at:"
+echo "  $CONFIG_PATH"
+echo "The existing logs were preserved at:"
+echo "  $LOG_DIR"

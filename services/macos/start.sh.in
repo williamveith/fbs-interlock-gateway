@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+
+APP="@APP@"
+INSTALL_DIR="@MACOS_INSTALL_DIR@"
+CONFIG_PATH="@MACOS_CONFIG_PATH@"
+
+cd "$INSTALL_DIR"
+exec "$INSTALL_DIR/$APP" -config "$CONFIG_PATH"
