@@ -6,81 +6,148 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 )
 
-func buildDigestAuthHeader(method, uri, username, password, challenge string) (string, error) {
+const (
+	maxDigestNonceCount uint32 = 30000
+	digestSessionMaxAge        = 55 * time.Minute
+)
+
+type digestSession struct {
+	realm      string
+	nonce      string
+	algorithm  string
+	qop        string
+	opaque     string
+	cnonce     string
+	nonceCount uint32
+	createdAt  time.Time
+}
+
+func newDigestSession(challenge string) (*digestSession, error) {
 	params := parseDigestChallenge(challenge)
 
 	realm := params["realm"]
 	nonce := params["nonce"]
 	algorithm := params["algorithm"]
 	qopRaw := params["qop"]
-	opaque := params["opaque"]
 
 	if realm == "" {
-		return "", fmt.Errorf("digest challenge missing realm")
+		return nil, fmt.Errorf("digest challenge missing realm")
 	}
 	if nonce == "" {
-		return "", fmt.Errorf("digest challenge missing nonce")
+		return nil, fmt.Errorf("digest challenge missing nonce")
 	}
 
 	if algorithm == "" {
 		algorithm = "SHA-256"
 	}
-
 	if !strings.EqualFold(algorithm, "SHA-256") {
-		return "", fmt.Errorf("unsupported digest algorithm %q", algorithm)
+		return nil, fmt.Errorf("unsupported digest algorithm %q", algorithm)
 	}
 
 	qop := chooseDigestQOP(qopRaw)
+	if strings.TrimSpace(qopRaw) != "" && qop == "" {
+		return nil, fmt.Errorf("unsupported digest qop %q", qopRaw)
+	}
 
-	ha1 := sha256Hex(username + ":" + realm + ":" + password)
+	cnonce := ""
+	if qop == "auth" {
+		var err error
+		cnonce, err = randomHex(16)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &digestSession{
+		realm:     realm,
+		nonce:     nonce,
+		algorithm: "SHA-256",
+		qop:       qop,
+		opaque:    params["opaque"],
+		cnonce:    cnonce,
+		createdAt: time.Now(),
+	}, nil
+}
+
+func (s *digestSession) expired(now time.Time) bool {
+	return s == nil ||
+		now.Sub(s.createdAt) >= digestSessionMaxAge ||
+		s.nonceCount >= maxDigestNonceCount
+}
+
+func (s *digestSession) nextAuthorizationHeader(
+	method string,
+	uri string,
+	username string,
+	password string,
+) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("digest session is nil")
+	}
+	if s.nonceCount >= maxDigestNonceCount {
+		return "", fmt.Errorf("digest nonce count exhausted")
+	}
+
+	s.nonceCount++
+	nc := fmt.Sprintf("%08x", s.nonceCount)
+
+	ha1 := sha256Hex(username + ":" + s.realm + ":" + password)
 	ha2 := sha256Hex(method + ":" + uri)
 
-	if qop == "auth" {
-		nc := "00000001"
-
-		cnonce, err := randomHex(16)
-		if err != nil {
-			return "", err
-		}
-
-		response := sha256Hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2)
+	if s.qop == "auth" {
+		response := sha256Hex(
+			ha1 + ":" + s.nonce + ":" + nc + ":" + s.cnonce + ":" + s.qop + ":" + ha2,
+		)
 
 		header := fmt.Sprintf(
 			`Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=SHA-256, response="%s", qop=auth, nc=%s, cnonce="%s"`,
 			escapeDigest(username),
-			escapeDigest(realm),
-			escapeDigest(nonce),
+			escapeDigest(s.realm),
+			escapeDigest(s.nonce),
 			escapeDigest(uri),
 			response,
 			nc,
-			escapeDigest(cnonce),
+			escapeDigest(s.cnonce),
 		)
 
-		if opaque != "" {
-			header += fmt.Sprintf(`, opaque="%s"`, escapeDigest(opaque))
+		if s.opaque != "" {
+			header += fmt.Sprintf(`, opaque="%s"`, escapeDigest(s.opaque))
 		}
 
 		return header, nil
 	}
 
-	response := sha256Hex(ha1 + ":" + nonce + ":" + ha2)
+	response := sha256Hex(ha1 + ":" + s.nonce + ":" + ha2)
 
 	header := fmt.Sprintf(
 		`Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=SHA-256, response="%s"`,
 		escapeDigest(username),
-		escapeDigest(realm),
-		escapeDigest(nonce),
+		escapeDigest(s.realm),
+		escapeDigest(s.nonce),
 		escapeDigest(uri),
 		response,
 	)
 
-	if opaque != "" {
-		header += fmt.Sprintf(`, opaque="%s"`, escapeDigest(opaque))
+	if s.opaque != "" {
+		header += fmt.Sprintf(`, opaque="%s"`, escapeDigest(s.opaque))
 	}
 
 	return header, nil
+}
+
+// buildDigestAuthHeader remains as a one-request helper for tests and callers
+// that already have a challenge. Client requests use a cached digestSession so
+// the nonce count can increase across calls.
+func buildDigestAuthHeader(method, uri, username, password, challenge string) (string, error) {
+	session, err := newDigestSession(challenge)
+	if err != nil {
+		return "", err
+	}
+
+	return session.nextAuthorizationHeader(method, uri, username, password)
 }
 
 func sha256Hex(s string) string {

@@ -22,11 +22,7 @@ func (e *HTTPError) Error() string {
 		operation = "request"
 	}
 
-	message := fmt.Sprintf(
-		"shelly %s HTTP %d",
-		operation,
-		e.StatusCode,
-	)
+	message := fmt.Sprintf("shelly %s HTTP %d", operation, e.StatusCode)
 
 	status := strings.TrimSpace(e.Status)
 	if status != "" {
@@ -34,7 +30,10 @@ func (e *HTTPError) Error() string {
 	}
 
 	body := strings.TrimSpace(e.Body)
-	if body != "" && !strings.EqualFold(body, status) {
+	statusText := http.StatusText(e.StatusCode)
+	if body != "" &&
+		!strings.EqualFold(body, status) &&
+		!strings.EqualFold(body, statusText) {
 		message += ": " + body
 	}
 
@@ -58,14 +57,20 @@ func IsHTTPStatus(err error, statusCodes ...int) bool {
 	return false
 }
 
-// RequiresReboot reports whether the Shelly returned the observed HTTP 423
-// condition that should trigger a controlled device reboot.
+// RequiresReboot reports whether the Shelly returned a persistent HTTP
+// condition that should trigger controlled device recovery. HTTP 429 reaches
+// this function only after the client has already waited for the documented
+// throttle window and retried the request once.
 func RequiresReboot(err error) bool {
-	return IsHTTPStatus(err, http.StatusLocked)
+	return IsHTTPStatus(
+		err,
+		http.StatusLocked,
+		http.StatusTooManyRequests,
+	)
 }
 
 // IsAuthenticationThrottled reports whether Shelly temporarily rejected an
-// authentication attempt with HTTP 429. This must not trigger a reboot.
+// authentication attempt with HTTP 429.
 func IsAuthenticationThrottled(err error) bool {
 	return IsHTTPStatus(err, http.StatusTooManyRequests)
 }
