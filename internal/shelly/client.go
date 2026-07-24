@@ -17,17 +17,29 @@ import (
 const (
 	maxResponseBodyBytes = 4096
 
+	authenticationThrottleDelay = 2 * time.Second
+	maxAuthenticationAttempts   = 6
+
 	rebootDelay           = 500 * time.Millisecond
-	rebootRequestTimeout  = 3 * time.Second
+	rebootRequestTimeout  = 6 * time.Second
 	defaultRebootCooldown = 5 * time.Minute
 )
 
 type Client struct {
 	http *http.Client
 
+	authMu                      sync.Mutex
+	authByIP                    map[string]*deviceAuthState
+	authenticationThrottleDelay time.Duration
+
 	recoveryMu     sync.Mutex
 	recoveryByIP   map[string]recoveryState
 	rebootCooldown time.Duration
+}
+
+type deviceAuthState struct {
+	mu      sync.Mutex
+	session *digestSession
 }
 
 type recoveryState struct {
@@ -50,8 +62,10 @@ func NewClient(timeout time.Duration) *Client {
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		recoveryByIP:   make(map[string]recoveryState),
-		rebootCooldown: defaultRebootCooldown,
+		authByIP:                    make(map[string]*deviceAuthState),
+		authenticationThrottleDelay: authenticationThrottleDelay,
+		recoveryByIP:                make(map[string]recoveryState),
+		rebootCooldown:              defaultRebootCooldown,
 	}
 }
 
@@ -131,18 +145,17 @@ func (c *Client) Reboot(ctx context.Context, tool config.Tool) error {
 }
 
 func (c *Client) handleHTTPError(tool config.Tool, err error) {
+	if !RequiresReboot(err) {
+		return
+	}
+
 	if IsAuthenticationThrottled(err) {
 		log.Printf(
-			"tool=%s shelly_authentication_throttled ip=%s error=%v",
+			"tool=%s shelly_authentication_throttled ip=%s action=reboot_after_retry error=%v",
 			tool.InterlockName,
 			tool.IP,
 			err,
 		)
-		return
-	}
-
-	if !RequiresReboot(err) {
-		return
 	}
 
 	c.scheduleReboot(tool, err)
@@ -242,12 +255,7 @@ func responseHTTPError(operation string, resp *http.Response) error {
 
 func (c *Client) doGET(ctx context.Context, tool config.Tool, url string) (*http.Response, error) {
 	if tool.Password == nil || strings.TrimSpace(*tool.Password) == "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		return c.http.Do(req)
+		return c.doUnauthenticatedGET(ctx, url)
 	}
 
 	username := "admin"
@@ -255,48 +263,196 @@ func (c *Client) doGET(ctx context.Context, tool config.Tool, url string) (*http
 		username = strings.TrimSpace(*tool.Username)
 	}
 
-	password := *tool.Password
+	deviceKey := strings.TrimSpace(tool.IP)
+	state := c.authState(deviceKey)
 
+	// Shelly requires nc to be strictly increasing for a reused nonce. Holding
+	// this lock across the request prevents concurrent calls to the same device
+	// from arriving out of nonce-count order.
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	return c.doAuthenticatedGETLocked(
+		ctx,
+		state,
+		url,
+		username,
+		*tool.Password,
+	)
+}
+
+func (c *Client) doUnauthenticatedGET(
+	ctx context.Context,
+	url string,
+) (*http.Response, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := c.sendGET(ctx, url, "")
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusTooManyRequests || attempt == 1 {
+			return resp, nil
+		}
+
+		drainAndClose(resp)
+
+		if err := waitForContext(ctx, c.authenticationThrottleDelay); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("shelly request retry limit exceeded")
+}
+
+func (c *Client) doAuthenticatedGETLocked(
+	ctx context.Context,
+	state *deviceAuthState,
+	url string,
+	username string,
+	password string,
+) (*http.Response, error) {
+	authenticationFailures := 0
+	throttleRetried := false
+
+	for attempt := 0; attempt < maxAuthenticationAttempts; attempt++ {
+		if state.session != nil && state.session.expired(time.Now()) {
+			state.session = nil
+		}
+
+		authorization := ""
+		authenticatedRequest := state.session != nil
+
+		if authenticatedRequest {
+			uri, err := requestURI(url)
+			if err != nil {
+				return nil, err
+			}
+
+			authorization, err = state.session.nextAuthorizationHeader(
+				http.MethodGet,
+				uri,
+				username,
+				password,
+			)
+			if err != nil {
+				state.session = nil
+				return nil, err
+			}
+		}
+
+		resp, err := c.sendGET(ctx, url, authorization)
+		if err != nil {
+			return nil, err
+		}
+
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			if authenticatedRequest {
+				authenticationFailures++
+				if authenticationFailures > 1 {
+					state.session = nil
+					return resp, nil
+				}
+			}
+
+			challenge := resp.Header.Get("WWW-Authenticate")
+			drainAndClose(resp)
+
+			if challenge == "" {
+				state.session = nil
+				return nil, fmt.Errorf(
+					"shelly returned 401 but no WWW-Authenticate header",
+				)
+			}
+
+			session, err := newDigestSession(challenge)
+			if err != nil {
+				state.session = nil
+				return nil, err
+			}
+
+			state.session = session
+			continue
+
+		case http.StatusTooManyRequests:
+			if throttleRetried {
+				return resp, nil
+			}
+
+			drainAndClose(resp)
+
+			if err := waitForContext(ctx, c.authenticationThrottleDelay); err != nil {
+				return nil, err
+			}
+
+			throttleRetried = true
+			continue
+
+		default:
+			return resp, nil
+		}
+	}
+
+	return nil, fmt.Errorf("shelly authentication retry limit exceeded")
+}
+
+func (c *Client) authState(deviceKey string) *deviceAuthState {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+
+	state := c.authByIP[deviceKey]
+	if state == nil {
+		state = &deviceAuthState{}
+		c.authByIP[deviceKey] = state
+	}
+
+	return state
+}
+
+func (c *Client) sendGET(
+	ctx context.Context,
+	url string,
+	authorization string,
+) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.http.Do(req)
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+
+	return c.http.Do(req)
+}
+
+func requestURI(rawURL string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		return resp, nil
-	}
+	return req.URL.RequestURI(), nil
+}
 
-	challenge := resp.Header.Get("WWW-Authenticate")
+func drainAndClose(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
 
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBodyBytes))
 	_ = resp.Body.Close()
+}
 
-	if challenge == "" {
-		return nil, fmt.Errorf("shelly returned 401 but no WWW-Authenticate header")
+func waitForContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	authHeader, err := buildDigestAuthHeader(
-		http.MethodGet,
-		req.URL.RequestURI(),
-		username,
-		password,
-		challenge,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	retryReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	retryReq.Header.Set("Authorization", authHeader)
-
-	return c.http.Do(retryReq)
 }
