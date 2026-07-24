@@ -2,6 +2,7 @@ package shelly
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -100,5 +101,158 @@ func TestClientRejectsInvalidStatusJSON(t *testing.T) {
 	client := NewClient(time.Second)
 	if _, err := client.GetStatus(context.Background(), toolForServer(server)); err == nil {
 		t.Fatal("expected JSON decoding error")
+	}
+}
+
+func TestGetStatusReturnsTypedHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad switch id", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	tool := testTool(server)
+
+	_, err := client.GetStatus(context.Background(), tool)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected HTTPError, got %T: %v", err, err)
+	}
+
+	if httpErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", httpErr.StatusCode)
+	}
+
+	if !IsHTTPStatus(err, http.StatusBadRequest) {
+		t.Fatal("expected IsHTTPStatus to match 400")
+	}
+}
+
+func TestRateLimitSchedulesSingleReboot(t *testing.T) {
+	var rebootRequests atomic.Int32
+	rebootSeen := make(chan struct{}, 2)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rpc/Switch.GetStatus":
+			http.Error(w, "Too many Requests", http.StatusLocked)
+
+		case "/rpc/Shelly.Reboot":
+			rebootRequests.Add(1)
+			rebootSeen <- struct{}{}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("null"))
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	client.rebootCooldown = time.Hour
+	tool := testTool(server)
+
+	_, err := client.GetStatus(context.Background(), tool)
+	if !IsHTTPStatus(err, http.StatusLocked) {
+		t.Fatalf("expected HTTP 423, got %v", err)
+	}
+
+	select {
+	case <-rebootSeen:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reboot request")
+	}
+
+	_, err = client.GetStatus(context.Background(), tool)
+	if !IsHTTPStatus(err, http.StatusLocked) {
+		t.Fatalf("expected second HTTP 423, got %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if got := rebootRequests.Load(); got != 1 {
+		t.Fatalf("expected exactly one reboot request, got %d", got)
+	}
+}
+
+func TestBadRequestDoesNotScheduleReboot(t *testing.T) {
+	var rebootRequests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rpc/Shelly.Reboot" {
+			rebootRequests.Add(1)
+			_, _ = w.Write([]byte("null"))
+			return
+		}
+
+		http.Error(w, "invalid argument", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	tool := testTool(server)
+
+	_, err := client.GetStatus(context.Background(), tool)
+	if !IsHTTPStatus(err, http.StatusBadRequest) {
+		t.Fatalf("expected HTTP 400, got %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if got := rebootRequests.Load(); got != 0 {
+		t.Fatalf("expected no reboot request, got %d", got)
+	}
+}
+
+func testTool(server *httptest.Server) config.Tool {
+	return config.Tool{
+		InterlockName: "test-tool",
+		IP:            server.Listener.Addr().String(),
+		SwitchID:      0,
+		Enabled:       true,
+	}
+}
+
+func TestTooManyRequestsDoesNotScheduleReboot(t *testing.T) {
+	var rebootRequests atomic.Int32
+
+	server := httptest.NewServer(
+		http.HandlerFunc(func(
+			w http.ResponseWriter,
+			r *http.Request,
+		) {
+			if r.URL.Path == "/rpc/Shelly.Reboot" {
+				rebootRequests.Add(1)
+				_, _ = w.Write([]byte("null"))
+				return
+			}
+
+			http.Error(
+				w,
+				"Too Many Requests",
+				http.StatusTooManyRequests,
+			)
+		}),
+	)
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	tool := testTool(server)
+
+	_, err := client.GetStatus(context.Background(), tool)
+	if !IsAuthenticationThrottled(err) {
+		t.Fatalf("expected HTTP 429, got %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if got := rebootRequests.Load(); got != 0 {
+		t.Fatalf(
+			"expected no reboot request for HTTP 429, got %d",
+			got,
+		)
 	}
 }

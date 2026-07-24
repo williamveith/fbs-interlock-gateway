@@ -139,15 +139,25 @@ install -o root -g wheel -m 0755 "$BIN_SRC" "$INSTALL_DIR/$APP"
 install -o root -g wheel -m 0755 "$START_SRC" "$INSTALL_DIR/start.sh"
 
 echo "Creating the configuration directory..."
-install -d -o root -g "$SERVICE_GROUP" -m 0750 "$CONFIG_DIR"
+install -d \
+  -o "$SERVICE_USER" \
+  -g "$SERVICE_GROUP" \
+  -m 0750 \
+  "$CONFIG_DIR"
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
   echo "Installing config.yaml..."
-  install -o root -g "$SERVICE_GROUP" -m 0640 "$CONFIG_SRC" "$CONFIG_PATH"
+  install \
+    -o "$SERVICE_USER" \
+    -g "$SERVICE_GROUP" \
+    -m 0640 \
+    "$CONFIG_SRC" \
+    "$CONFIG_PATH"
 else
   echo "Existing config found; preserving:"
   echo "  $CONFIG_PATH"
-  chown root:"$SERVICE_GROUP" "$CONFIG_PATH"
+
+  chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_PATH"
   chmod 0640 "$CONFIG_PATH"
 fi
 
