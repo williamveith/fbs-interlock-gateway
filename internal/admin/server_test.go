@@ -59,11 +59,16 @@ func (f fakeStatusClient) GetStatus(
 }
 
 func TestHandleConfigGet(t *testing.T) {
-	expected := config.Config{
+	stored := config.Config{
 		Bind: "127.0.0.1",
 		Defaults: config.Defaults{
 			TimeoutMS:        800,
 			SafeStateOnError: "off",
+			ShellyTLS: config.ShellyTLSConfig{
+				ServerCAFile:   "/etc/fbs-interlock-gateway/tls/server-ca.crt",
+				ClientCertFile: "/etc/fbs-interlock-gateway/tls/gateway-client.crt",
+				ClientKeyFile:  "/etc/fbs-interlock-gateway/tls/gateway-client.key",
+			},
 		},
 		Tools: []config.Tool{
 			{
@@ -73,12 +78,22 @@ func TestHandleConfigGet(t *testing.T) {
 				SwitchID:      0,
 				Enabled:       true,
 			},
+			{
+				InterlockName: "EQU-TEST-02",
+				IP:            "192.0.2.11",
+				Protocol:      "https",
+				Port:          8082,
+				SwitchID:      0,
+				Enabled:       true,
+			},
 		},
 	}
 
-	store := &fakeConfigStore{
-		cfg: expected,
-	}
+	expected := stored
+	expected.Tools = append([]config.Tool(nil), stored.Tools...)
+	expected.Tools[0].Protocol = "http"
+
+	store := &fakeConfigStore{cfg: stored}
 
 	server := New(
 		"127.0.0.1:0",
@@ -136,11 +151,16 @@ func TestHandleConfigGet(t *testing.T) {
 }
 
 func TestHandleConfigPut(t *testing.T) {
-	newConfig := config.Config{
+	requestConfig := config.Config{
 		Bind: "0.0.0.0",
 		Defaults: config.Defaults{
 			TimeoutMS:        1200,
 			SafeStateOnError: "off",
+			ShellyTLS: config.ShellyTLSConfig{
+				ServerCAFile:   "/etc/fbs-interlock-gateway/tls/server-ca.crt",
+				ClientCertFile: "/etc/fbs-interlock-gateway/tls/gateway-client.crt",
+				ClientKeyFile:  "/etc/fbs-interlock-gateway/tls/gateway-client.key",
+			},
 		},
 		Tools: []config.Tool{
 			{
@@ -150,10 +170,23 @@ func TestHandleConfigPut(t *testing.T) {
 				SwitchID:      0,
 				Enabled:       true,
 			},
+			{
+				InterlockName: "EQU-TEST-03",
+				IP:            "192.0.2.21",
+				Protocol:      " HTTPS ",
+				Port:          8083,
+				SwitchID:      0,
+				Enabled:       true,
+			},
 		},
 	}
 
-	body, err := json.Marshal(newConfig)
+	expected := requestConfig
+	expected.Tools = append([]config.Tool(nil), requestConfig.Tools...)
+	expected.Tools[0].Protocol = "http"
+	expected.Tools[1].Protocol = "https"
+
+	body, err := json.Marshal(requestConfig)
 	if err != nil {
 		t.Fatalf("failed to marshal test config: %v", err)
 	}
@@ -200,10 +233,10 @@ func TestHandleConfigPut(t *testing.T) {
 		)
 	}
 
-	if !reflect.DeepEqual(store.updated, newConfig) {
+	if !reflect.DeepEqual(store.updated, expected) {
 		t.Fatalf(
 			"unexpected updated config\nexpected: %#v\nactual:   %#v",
-			newConfig,
+			expected,
 			store.updated,
 		)
 	}
@@ -386,6 +419,7 @@ func TestHandleStatus(t *testing.T) {
 				{
 					InterlockName: "CONNECTED",
 					IP:            "192.0.2.11",
+					Protocol:      "https",
 					Port:          8082,
 					SwitchID:      0,
 					Enabled:       true,
@@ -488,6 +522,10 @@ func TestHandleStatus(t *testing.T) {
 		)
 	}
 
+	if disabled.Protocol != "http" {
+		t.Fatalf("disabled protocol = %q, want http", disabled.Protocol)
+	}
+
 	connected := results[1]
 
 	if !connected.Enabled {
@@ -507,6 +545,10 @@ func TestHandleStatus(t *testing.T) {
 			"expected connected tool error to be empty, got %q",
 			connected.Error,
 		)
+	}
+
+	if connected.Protocol != "https" {
+		t.Fatalf("connected protocol = %q, want https", connected.Protocol)
 	}
 
 	failed := results[2]
@@ -530,6 +572,10 @@ func TestHandleStatus(t *testing.T) {
 			"expected Shelly error, got %q",
 			failed.Error,
 		)
+	}
+
+	if failed.Protocol != "http" {
+		t.Fatalf("failed protocol = %q, want http", failed.Protocol)
 	}
 }
 

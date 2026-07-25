@@ -2,12 +2,20 @@ package gateway
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
 )
@@ -412,4 +420,168 @@ func TestConcurrentConfigReadsAndUpdates(t *testing.T) {
 	}
 
 	waitGroup.Wait()
+}
+
+func TestNewStoresTLSInitializationError(t *testing.T) {
+	cfg := testConfig("off")
+	cfg.Defaults.ShellyTLS = config.ShellyTLSConfig{
+		ServerCAFile: "/does/not/exist/server-ca.crt",
+	}
+
+	gateway := New(cfg, "/tmp/config.yaml", "")
+
+	if gateway.initErr == nil {
+		t.Fatal("expected TLS initialization error")
+	}
+	if gateway.shelly != nil {
+		t.Fatal("expected Shelly client to be nil after initialization failure")
+	}
+}
+
+func TestRunReturnsTLSInitializationError(t *testing.T) {
+	cfg := testConfig("off")
+	cfg.Defaults.ShellyTLS = config.ShellyTLSConfig{
+		ServerCAFile: "/does/not/exist/server-ca.crt",
+	}
+
+	gateway := New(cfg, "/tmp/config.yaml", "")
+
+	err := gateway.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected TLS initialization error")
+	}
+	if !strings.Contains(err.Error(), "initialize Shelly client") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewInitializesClientWithValidTLSFiles(t *testing.T) {
+	tlsConfig := gatewayTestTLSConfig(t)
+	cfg := testConfig("off")
+	cfg.Defaults.ShellyTLS = tlsConfig
+
+	gateway := New(cfg, "/tmp/config.yaml", "")
+
+	if gateway.initErr != nil {
+		t.Fatalf("unexpected TLS initialization error: %v", gateway.initErr)
+	}
+	if gateway.shelly == nil {
+		t.Fatal("expected Shelly client to be initialized")
+	}
+}
+
+func TestRunRejectsHTTPSWithoutTLSPaths(t *testing.T) {
+	cfg := testConfig("off")
+	cfg.Tools[0].Protocol = "https"
+
+	gateway := New(cfg, "/tmp/config.yaml", "")
+
+	err := gateway.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected missing TLS configuration to be rejected")
+	}
+	if !strings.Contains(err.Error(), "server_ca_file is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func gatewayTestTLSConfig(t *testing.T) config.ShellyTLSConfig {
+	t.Helper()
+
+	dir := t.TempDir()
+	now := time.Now()
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Gateway Test CA"},
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	caDER, err := x509.CreateCertificate(
+		rand.Reader,
+		caTemplate,
+		caTemplate,
+		&caKey.PublicKey,
+		caKey,
+	)
+	if err != nil {
+		t.Fatalf("create CA certificate: %v", err)
+	}
+
+	caCertificate, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA certificate: %v", err)
+	}
+
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate client key: %v", err)
+	}
+
+	clientTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject: pkix.Name{
+			CommonName: "fbs-interlock-gateway-test",
+		},
+		NotBefore:   now.Add(-time.Minute),
+		NotAfter:    now.Add(time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	clientDER, err := x509.CreateCertificate(
+		rand.Reader,
+		clientTemplate,
+		caCertificate,
+		&clientKey.PublicKey,
+		caKey,
+	)
+	if err != nil {
+		t.Fatalf("create client certificate: %v", err)
+	}
+
+	clientKeyDER, err := x509.MarshalECPrivateKey(clientKey)
+	if err != nil {
+		t.Fatalf("marshal client key: %v", err)
+	}
+
+	serverCAFile := filepath.Join(dir, "server-ca.crt")
+	clientCertFile := filepath.Join(dir, "gateway-client.crt")
+	clientKeyFile := filepath.Join(dir, "gateway-client.key")
+
+	writeGatewayTestFile(t, serverCAFile, pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: caDER,
+	}))
+	writeGatewayTestFile(t, clientCertFile, pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: clientDER,
+	}))
+	writeGatewayTestFile(t, clientKeyFile, pem.EncodeToMemory(&pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: clientKeyDER,
+	}))
+
+	return config.ShellyTLSConfig{
+		ServerCAFile:   serverCAFile,
+		ClientCertFile: clientCertFile,
+		ClientKeyFile:  clientKeyFile,
+	}
+}
+
+func writeGatewayTestFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }
