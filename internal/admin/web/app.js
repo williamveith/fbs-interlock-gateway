@@ -17,7 +17,8 @@ const STATUS_HEADERS = [
     'Enabled',
     'Connected',
     'Output',
-    'Error'
+    'Error',
+    'Protocol'
 ];
 
 const CONFIG_HEADERS = [
@@ -28,7 +29,14 @@ const CONFIG_HEADERS = [
     'Switch ID',
     'Username',
     'Password',
+    'Protocol',
     'Delete'
+];
+
+const TLS_CONFIG_FIELDS = [
+    ['serverCAFile', 'server_ca_file'],
+    ['clientCertFile', 'client_cert_file'],
+    ['clientKeyFile', 'client_key_file']
 ];
 
 // =========================
@@ -229,6 +237,64 @@ function getSaveConfigButton() {
     return document.querySelector('button[onclick="saveConfig()"]');
 }
 
+function normalizeProtocol(value) {
+    return String(value ?? '').trim().toLowerCase() === 'https'
+        ? 'https'
+        : 'http';
+}
+
+function normalizeLoadedConfig(loadedConfig) {
+    loadedConfig.defaults ??= {};
+    loadedConfig.defaults.shelly_tls ??= {};
+
+    for (const [, field] of TLS_CONFIG_FIELDS) {
+        loadedConfig.defaults.shelly_tls[field] = String(
+            loadedConfig.defaults.shelly_tls[field] ?? ''
+        );
+    }
+
+    for (const tool of loadedConfig.tools) {
+        tool.protocol = normalizeProtocol(tool.protocol);
+    }
+
+    return loadedConfig;
+}
+
+function renderTLSConfig() {
+    if (!config) {
+        return;
+    }
+
+    for (const [elementID, field] of TLS_CONFIG_FIELDS) {
+        const input = document.getElementById(elementID);
+
+        if (input) {
+            input.value = config.defaults.shelly_tls[field] ?? '';
+        }
+    }
+}
+
+function handleTLSConfigInput(event) {
+    if (!config) {
+        return;
+    }
+
+    const input = event.target.closest('[data-tls-field]');
+    if (!input) {
+        return;
+    }
+
+    config.defaults.shelly_tls[input.dataset.tlsField] = input.value;
+    validateConfigInputs({ report: event.type === 'change' });
+}
+
+function enableTLSConfigEditing() {
+    const container = document.getElementById('tlsSettings');
+
+    container?.addEventListener('input', handleTLSConfigInput);
+    container?.addEventListener('change', handleTLSConfigInput);
+}
+
 // =========================
 // CONFIGURATION LOADING
 // =========================
@@ -275,7 +341,8 @@ async function loadConfig() {
             throw new Error('Configuration response has an invalid structure');
         }
 
-        config = loadedConfig;
+        config = normalizeLoadedConfig(loadedConfig);
+        renderTLSConfig();
         renderConfig();
     } catch (error) {
         const message = getErrorMessage(error);
@@ -397,6 +464,7 @@ function updateStatusRow(tableRow, status) {
     setElementText(cells[4], status.connected ? 'yes' : 'no');
     setElementText(cells[5], output ? 'on' : 'off');
     setElementText(cells[6], errorMessage);
+    setElementText(cells[7], normalizeProtocol(status.protocol));
 
     cells[5].classList.toggle('on', output);
     cells[5].classList.toggle('off', !output);
@@ -522,6 +590,24 @@ function createInput({
     return input;
 }
 
+function createProtocolInput(value, index) {
+    const input = createInput({
+        type: 'text',
+        value: normalizeProtocol(value),
+        required: true,
+        field: 'protocol',
+        index
+    });
+
+    input.setAttribute('list', 'protocolOptions');
+    input.setAttribute('pattern', 'https?');
+    input.setAttribute('aria-label', 'Shelly protocol');
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+
+    return input;
+}
+
 function createConfigRow(tool, index) {
     const row = document.createElement('tr');
     row.dataset.index = String(index);
@@ -542,6 +628,12 @@ function createConfigRow(tool, index) {
         required: true,
         index
     }));
+
+    const protocolCell = document.createElement('td');
+    protocolCell.appendChild(createProtocolInput(
+        tool.protocol,
+        index
+    ));
 
     const ipCell = document.createElement('td');
     ipCell.appendChild(createInput({
@@ -597,6 +689,7 @@ function createConfigRow(tool, index) {
 
     const deleteTrigger = document.createElement('span');
     deleteTrigger.className = 'glyph delete-trigger';
+    deleteTrigger.dataset.index = String(index);
     deleteTrigger.innerHTML = '&osol;';
 
     deleteCell.appendChild(deleteTrigger);
@@ -609,21 +702,11 @@ function createConfigRow(tool, index) {
         switchIDCell,
         usernameCell,
         passwordCell,
+        protocolCell,
         deleteCell
     );
 
     return row;
-}
-
-function enableRowDelete() {
-    const table = document.getElementById('configTable');
-
-    table.querySelectorAll('.delete-trigger').forEach((trigger, index) => {
-        trigger.addEventListener('click', () => {
-            config.tools.splice(index, 1);
-            renderConfig();
-        });
-    });
 }
 
 function renderConfig() {
@@ -652,7 +735,6 @@ function renderConfig() {
 
     table.append(thead, tbody);
 
-    enableRowDelete();
     validateConfigInputs();
 }
 
@@ -675,6 +757,9 @@ function parseInputValue(input) {
     case 'ip':
         return input.value.trim();
 
+    case 'protocol':
+        return input.value.trim().toLowerCase();
+
     case 'username':
         return input.value === ''
             ? null
@@ -691,7 +776,9 @@ function parseInputValue(input) {
 }
 
 function handleConfigInput(event) {
-    const input = event.target.closest('input[data-field]');
+    const input = event.target.closest(
+        'input[data-field], select[data-field]'
+    );
 
     if (!input || !config) {
         return;
@@ -712,7 +799,11 @@ function handleConfigInput(event) {
         tool.clear_password = false;
     }
 
-    if (input.dataset.unique) {
+    if (
+        input.dataset.unique ||
+        field === 'enabled' ||
+        field === 'protocol'
+    ) {
         validateConfigInputs({
             report: event.type === 'change'
         });
@@ -802,6 +893,7 @@ function addTool() {
         config.tools.push({
             interlock_name: '',
             ip: '',
+            protocol: 'http',
             port: nextPort,
             switch_id: 0,
             username: null,
@@ -838,6 +930,33 @@ function normalizeUniqueValue(field, value) {
     return field === 'port'
         ? normalized
         : normalized.toLowerCase();
+}
+
+function validateTLSConfigInputs() {
+    const httpsEnabled = config?.tools.some(tool =>
+        tool.enabled && normalizeProtocol(tool.protocol) === 'https'
+    ) ?? false;
+
+    let firstInvalid = null;
+
+    for (const [elementID] of TLS_CONFIG_FIELDS) {
+        const input = document.getElementById(elementID);
+        if (!input) {
+            continue;
+        }
+
+        const message = httpsEnabled && input.value.trim() === ''
+            ? 'Required when an enabled tool uses HTTPS.'
+            : '';
+
+        input.setCustomValidity(message);
+
+        if (!input.checkValidity() && !firstInvalid) {
+            firstInvalid = input;
+        }
+    }
+
+    return firstInvalid;
 }
 
 function validateConfigInputs({ report = false } = {}) {
@@ -895,6 +1014,29 @@ function validateConfigInputs({ report = false } = {}) {
                 firstInvalid = input;
             }
         }
+    }
+
+    const protocolInputs = [
+        ...table.querySelectorAll('[data-field="protocol"]')
+    ];
+
+    for (const input of protocolInputs) {
+        const protocol = input.value.trim().toLowerCase();
+        const message = protocol === 'http' || protocol === 'https'
+            ? ''
+            : 'Protocol must be http or https.';
+
+        input.setCustomValidity(message);
+
+        if (!input.checkValidity() && !firstInvalid) {
+            firstInvalid = input;
+        }
+    }
+
+    const tlsInvalid = validateTLSConfigInputs();
+
+    if (!firstInvalid) {
+        firstInvalid = tlsInvalid;
     }
 
     if (report && firstInvalid) {
@@ -1019,6 +1161,7 @@ function handleVisibilityChange() {
 
 async function initialize() {
     enableConfigEventDelegation();
+    enableTLSConfigEditing();
 
     document.addEventListener(
         'visibilitychange',

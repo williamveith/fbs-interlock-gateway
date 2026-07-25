@@ -343,6 +343,10 @@ init-config:
 			'defaults:' \
 			'  timeout_ms: 800' \
 			'  safe_state_on_error: "off"' \
+			'  shelly_tls:' \
+			'    server_ca_file: "./tls/server-ca.crt"' \
+			'    client_cert_file: "./tls/gateway-client.crt"' \
+			'    client_key_file: "./tls/gateway-client.key"' \
 			'' \
 			'tools:' \
 			'  - interlock_name:' \

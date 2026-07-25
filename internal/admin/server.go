@@ -58,6 +58,7 @@ type Server struct {
 type ToolStatus struct {
 	InterlockName string `json:"interlock_name"`
 	IP            string `json:"ip"`
+	Protocol      string `json:"protocol"`
 	Port          int    `json:"port"`
 	SwitchID      int    `json:"switch_id"`
 	Enabled       bool   `json:"enabled"`
@@ -75,6 +76,7 @@ type adminConfigRequest struct {
 type adminToolRequest struct {
 	InterlockName string  `json:"interlock_name"`
 	IP            string  `json:"ip"`
+	Protocol      string  `json:"protocol"`
 	Port          int     `json:"port"`
 	SwitchID      int     `json:"switch_id"`
 	Username      *string `json:"username"`
@@ -97,13 +99,15 @@ type adminConfigResponse struct {
 }
 
 type adminDefaultsResponse struct {
-	TimeoutMS        int    `json:"timeout_ms"`
-	SafeStateOnError string `json:"safe_state_on_error"`
+	TimeoutMS        int                    `json:"timeout_ms"`
+	SafeStateOnError string                 `json:"safe_state_on_error"`
+	ShellyTLS        config.ShellyTLSConfig `json:"shelly_tls"`
 }
 
 type adminToolResponse struct {
 	InterlockName string  `json:"interlock_name"`
 	IP            string  `json:"ip"`
+	Protocol      string  `json:"protocol"`
 	Port          int     `json:"port"`
 	SwitchID      int     `json:"switch_id"`
 	Username      *string `json:"username"`
@@ -236,6 +240,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter) {
 		Defaults: adminDefaultsResponse{
 			TimeoutMS:        cfg.Defaults.TimeoutMS,
 			SafeStateOnError: cfg.Defaults.SafeStateOnError,
+			ShellyTLS:        cfg.Defaults.ShellyTLS,
 		},
 		Tools: make([]adminToolResponse, len(cfg.Tools)),
 	}
@@ -244,6 +249,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter) {
 		response.Tools[i] = adminToolResponse{
 			InterlockName: tool.InterlockName,
 			IP:            tool.IP,
+			Protocol:      config.ToolProtocol(tool),
 			Port:          tool.Port,
 			SwitchID:      tool.SwitchID,
 			Username:      cloneStringPointer(tool.Username),
@@ -332,7 +338,10 @@ func buildUpdatedConfig(
 			InterlockName: strings.TrimSpace(
 				incoming.InterlockName,
 			),
-			IP:       strings.TrimSpace(incoming.IP),
+			IP: strings.TrimSpace(incoming.IP),
+			Protocol: config.ToolProtocol(config.Tool{
+				Protocol: incoming.Protocol,
+			}),
 			Port:     incoming.Port,
 			SwitchID: incoming.SwitchID,
 			Username: normalizeOptionalString(
@@ -451,6 +460,7 @@ func (s *Server) handleStatus(
 		results[i] = ToolStatus{
 			InterlockName: tool.InterlockName,
 			IP:            tool.IP,
+			Protocol:      config.ToolProtocol(tool),
 			Port:          tool.Port,
 			SwitchID:      tool.SwitchID,
 			Enabled:       tool.Enabled,
