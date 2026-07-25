@@ -10,7 +10,8 @@ StartLimitBurst=10
 Type=simple
 User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
-WorkingDirectory=@INSTALL_DIR@
+# Relative paths in config.yaml, including ./tls/..., resolve from here.
+WorkingDirectory=@CONFIG_DIR@
 ExecStart=@INSTALL_DIR@/@APP@ -config @CONFIG_PATH@
 
 StandardOutput=journal
