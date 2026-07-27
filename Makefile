@@ -362,7 +362,7 @@ init-config:
 			'bind: 0.0.0.0' \
 			'' \
 			'defaults:' \
-			'  timeout_ms: 800' \
+			'  timeout_ms: 10000' \
 			'  safe_state_on_error: "off"' \
 			'  shelly_tls:' \
 			'    server_ca_file: "./tls/server-ca.crt"' \
