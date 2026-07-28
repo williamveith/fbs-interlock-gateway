@@ -10,11 +10,24 @@ MAC_DIR := $(BUILD_DIR)/darwin
 MAC_ARM64_DIR := $(MAC_DIR)/arm64
 MAC_AMD64_DIR := $(MAC_DIR)/amd64
 LINUX_DIR := $(BUILD_DIR)/linux
+LINUX_TLS_DIR := $(LINUX_DIR)/tls
 WINDOWS_DIR := $(BUILD_DIR)/windows
 
 CONFIGS := config.yaml
 CONFIG_DIR ?= /etc/$(APP)
 CONFIG_PATH ?= $(CONFIG_DIR)/$(CONFIGS)
+
+TLS_SOURCE_DIR := tls
+TLS_DIR ?= $(CONFIG_DIR)/tls
+
+TLS_SERVER_CA_SOURCE := $(TLS_SOURCE_DIR)/server-ca.crt
+TLS_CLIENT_CERT_SOURCE := $(TLS_SOURCE_DIR)/gateway-client.crt
+TLS_CLIENT_KEY_SOURCE := $(TLS_SOURCE_DIR)/gateway-client.key
+
+TLS_SOURCE_FILES := \
+	$(TLS_SERVER_CA_SOURCE) \
+	$(TLS_CLIENT_CERT_SOURCE) \
+	$(TLS_CLIENT_KEY_SOURCE)
 
 INSTALL_DIR ?= /opt/$(APP)
 SERVICE_USER ?= fbs-gateway
@@ -151,6 +164,7 @@ endif
 	build-linux-arm64 \
 	build-linux-amd64 \
 	build-windows-amd64 \
+	check-runtime-tls \
 	windows-deployment-files \
 	macos-arm64-deployment-files \
 	macos-amd64-deployment-files \
@@ -162,6 +176,9 @@ endif
 	release-darwin-amd64 \
 	release \
 	shelly-auth \
+	ca \
+	gateway-cert \
+	shelly-cert \
 	clean
 
 # =========================
@@ -192,6 +209,7 @@ $(SERVICE_OUT): $(SERVICE_TEMPLATE) Makefile
 		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
 		-e 's|@CONFIG_DIR@|$(CONFIG_DIR)|g' \
 		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
+		-e 's|@TLS_DIR@|$(TLS_DIR)|g' \
 		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(SERVICE_TEMPLATE)" > "$@"
@@ -203,6 +221,7 @@ $(INSTALL_OUT): $(INSTALL_TEMPLATE) Makefile
 		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
 		-e 's|@CONFIG_DIR@|$(CONFIG_DIR)|g' \
 		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
+		-e 's|@TLS_DIR@|$(TLS_DIR)|g' \
 		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		-e 's|@FBS_SOURCE_IP@|$(FBS_SOURCE_IP)|g' \
@@ -341,8 +360,12 @@ init-config:
 			'bind: 0.0.0.0' \
 			'' \
 			'defaults:' \
-			'  timeout_ms: 800' \
+			'  timeout_ms: 3000' \
 			'  safe_state_on_error: "off"' \
+			'  shelly_tls:' \
+			'    server_ca_file: "./tls/server-ca.crt"' \
+			'    client_cert_file: "./tls/gateway-client.crt"' \
+			'    client_key_file: "./tls/gateway-client.key"' \
 			'' \
 			'tools:' \
 			'  - interlock_name:' \
@@ -358,6 +381,32 @@ init-config:
 # =========================
 # DEPLOYMENT BUILDS
 # =========================
+
+
+check-runtime-tls:
+	@for file in $(TLS_SOURCE_FILES); do \
+		if [ ! -f "$$file" ]; then \
+			echo "ERROR: Missing gateway runtime TLS file: $$file"; \
+			echo "Run scripts/tls/create-ca.sh and"; \
+			echo "scripts/tls/create-gateway-client.sh first."; \
+			exit 1; \
+		fi; \
+	done
+
+define copy_linux_tls
+	rm -rf "$(LINUX_TLS_DIR)"
+	mkdir -p "$(LINUX_TLS_DIR)"
+	install -m 0644 \
+		"$(TLS_SERVER_CA_SOURCE)" \
+		"$(LINUX_TLS_DIR)/server-ca.crt"
+	install -m 0644 \
+		"$(TLS_CLIENT_CERT_SOURCE)" \
+		"$(LINUX_TLS_DIR)/gateway-client.crt"
+	install -m 0600 \
+		"$(TLS_CLIENT_KEY_SOURCE)" \
+		"$(LINUX_TLS_DIR)/gateway-client.key"
+endef
+
 
 build-darwin-arm64: fmt $(MACOS_ARM64_DEPLOYMENT_FILES)
 	mkdir -p "$(MAC_ARM64_DIR)"
@@ -379,20 +428,22 @@ build-darwin-amd64: fmt $(MACOS_AMD64_DEPLOYMENT_FILES)
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-arm64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-arm64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
+	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-amd64: fmt $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-amd64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
+	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
@@ -494,6 +545,7 @@ test-race:
 
 scripts-check:
 	bash -n scripts/*.sh
+	bash -n scripts/tls/*.sh
 	bash -n \
 		"$(INSTALL_TEMPLATE)" \
 		"$(UPDATE_TEMPLATE)" \
@@ -553,6 +605,22 @@ release: \
 shelly-auth:
 	@chmod +x scripts/set-shelly-auth.sh
 	@./scripts/set-shelly-auth.sh
+
+# =========================
+# TLS UTILITIES
+# =========================
+
+ca:
+	@chmod +x scripts/tls/create-ca.sh
+	@./scripts/tls/create-ca.sh
+
+gateway-cert:
+	@chmod +x scripts/tls/create-gateway-client.sh
+	@./scripts/tls/create-gateway-client.sh
+
+shelly-cert:
+	@chmod +x scripts/tls/create-shelly-cert.sh
+	@./scripts/tls/create-shelly-cert.sh
 
 clean:
 	rm -rf "$(BUILD_DIR)"

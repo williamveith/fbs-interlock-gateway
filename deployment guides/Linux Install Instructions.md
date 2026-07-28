@@ -7,11 +7,13 @@
   - [Create the User Account](#create-the-user-account)
 
 - [Deploy the Software](#deploy-the-software)
-  - [Build the Deployment Assets](#build-the-deployment-assets)
+  - [Prepare the Gateway TLS Files](#prepare-the-gateway-tls-files)
+- [Build the Deployment Assets](#build-the-deployment-assets)
   - [Copy the Deployment Directory to a USB Drive](#copy-the-deployment-directory-to-a-usb-drive)
   - [Copy the Deployment Directory to the Gateway Machine](#copy-the-deployment-directory-to-the-gateway-machine)
   - [Install the Gateway](#install-the-gateway)
   - [What the Installer Does](#what-the-installer-does)
+  - [Verify the Installed TLS Files](#verify-the-installed-tls-files)
   - [Check the Service Status](#check-the-service-status)
   - [View Live Logs](#view-live-logs)
   - [Restart the Service Manually](#restart-the-service-manually)
@@ -49,6 +51,47 @@ Reboot the machine.
 
 # Deploy the Software
 
+
+## Prepare the Gateway TLS Files
+
+Before building the Linux deployment directory, generate the certificate
+authorities and gateway client identity:
+
+```bash
+make ca
+make gateway-cert
+```
+
+The gateway certificate command populates the repository runtime directory:
+
+```text
+tls/
+├── server-ca.crt
+├── gateway-client.crt
+└── gateway-client.key
+```
+
+Only these three runtime files are packaged for the Linux gateway. The complete
+`pki/` directory, CA private keys, Shelly certificates, CSRs, and
+`client-ca.crt` are not copied to the gateway.
+
+The installed configuration uses:
+
+```yaml
+defaults:
+  shelly_tls:
+    server_ca_file: "./tls/server-ca.crt"
+    client_cert_file: "./tls/gateway-client.crt"
+    client_key_file: "./tls/gateway-client.key"
+```
+
+The systemd service runs with `/etc/fbs-interlock-gateway` as its working
+directory, so these relative paths point to:
+
+```text
+/etc/fbs-interlock-gateway/tls/
+```
+
 ## Build the Deployment Assets
 
 On the development machine, run:
@@ -64,6 +107,8 @@ This generates the Linux deployment directory:
 build/linux/
 ```
 
+The build fails if any required runtime TLS file is missing.
+
 ## Copy the Deployment Directory to a USB Drive
 
 Copy the entire `build/linux/` directory to a USB flash drive.
@@ -75,6 +120,7 @@ Do **not** copy only the application binary. The complete directory is required 
 - The systemd service files
 - The updater and update timer files
 - The configuration file
+- The gateway runtime TLS directory
 - These deployment instructions
 
 ## Copy the Deployment Directory to the Gateway Machine
@@ -87,6 +133,15 @@ The resulting directory should look similar to:
 
 ```text
 ~/Downloads/linux/
+├── fbs-interlock-gateway
+├── install.sh
+├── update.sh
+├── config.yaml
+├── tls
+│   ├── server-ca.crt
+│   ├── gateway-client.crt
+│   └── gateway-client.key
+└── ...
 ```
 
 ## Install the Gateway
@@ -113,12 +168,51 @@ The installer performs the following actions:
   /etc/fbs-interlock-gateway/config.yaml
   ```
 
+- Installs the gateway runtime TLS files at:
+  ```
+  /etc/fbs-interlock-gateway/tls/
+  ```
+
 - Creates the gateway service account when needed
 - Installs the systemd service
 - Enables and starts the gateway service
 - Installs the updater and update timer when their files are present
 
 An existing production configuration file is preserved during reinstallation.
+Existing gateway TLS files are also preserved. The hourly updater replaces only
+the application binary and does not modify the configuration or TLS files.
+
+
+## Verify the Installed TLS Files
+
+Confirm that all three files are installed:
+
+```bash
+sudo ls -l /etc/fbs-interlock-gateway/tls
+```
+
+Expected files:
+
+```text
+server-ca.crt
+gateway-client.crt
+gateway-client.key
+```
+
+Confirm that the service account can read them:
+
+```bash
+sudo -u fbs-gateway test \
+  -r /etc/fbs-interlock-gateway/tls/server-ca.crt
+
+sudo -u fbs-gateway test \
+  -r /etc/fbs-interlock-gateway/tls/gateway-client.crt
+
+sudo -u fbs-gateway test \
+  -r /etc/fbs-interlock-gateway/tls/gateway-client.key
+```
+
+Each command should exit without printing an error.
 
 ## Check the Service Status
 

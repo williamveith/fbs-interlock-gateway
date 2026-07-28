@@ -21,17 +21,24 @@ type Gateway struct {
 	adminAddr  string
 	safeOutput bool
 	shelly     *shelly.Client
+	initErr    error
 }
 
 func New(cfg config.Config, configPath string, adminAddr string) *Gateway {
 	config.ApplyDefaults(&cfg)
+
+	shellyClient, err := shelly.NewClientWithTLS(
+		time.Duration(cfg.Defaults.TimeoutMS)*time.Millisecond,
+		cfg.Defaults.ShellyTLS,
+	)
 
 	return &Gateway{
 		cfg:        cfg,
 		configPath: configPath,
 		adminAddr:  adminAddr,
 		safeOutput: config.SafeOutput(cfg),
-		shelly:     shelly.NewClient(time.Duration(cfg.Defaults.TimeoutMS) * time.Millisecond),
+		shelly:     shellyClient,
+		initErr:    err,
 	}
 }
 
@@ -39,7 +46,12 @@ func (g *Gateway) Run(ctx context.Context) error {
 	g.mu.RLock()
 	cfg := g.cfg
 	adminAddr := g.adminAddr
+	initErr := g.initErr
 	g.mu.RUnlock()
+
+	if initErr != nil {
+		return fmt.Errorf("initialize Shelly client: %w", initErr)
+	}
 
 	if err := config.ValidateEnabledTools(cfg); err != nil {
 		return err

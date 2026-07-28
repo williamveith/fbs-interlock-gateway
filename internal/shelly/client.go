@@ -2,11 +2,18 @@ package shelly
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,33 +59,85 @@ type SwitchStatus struct {
 	Output bool `json:"output"`
 }
 
+// NewClient creates the existing HTTP-capable Shelly client. It remains for
+// backward compatibility with current callers and tests.
 func NewClient(timeout time.Duration) *Client {
+	client, err := newClient(timeout, config.ShellyTLSConfig{})
+	if err != nil {
+		// An empty TLS configuration cannot produce an error. Panic here makes a
+		// future programming regression immediately visible instead of returning
+		// a partially initialized client.
+		panic(fmt.Sprintf("initialize Shelly client: %v", err))
+	}
+
+	return client
+}
+
+// NewClientWithTLS creates a Shelly client that verifies each HTTPS Shelly
+// server against ServerCAFile and presents the configured client certificate
+// and private key during the mutual-TLS handshake. The same client can still
+// communicate with tools configured to use plain HTTP.
+func NewClientWithTLS(
+	timeout time.Duration,
+	tlsConfig config.ShellyTLSConfig,
+) (*Client, error) {
+	return newClient(timeout, tlsConfig)
+}
+
+func newClient(
+	timeout time.Duration,
+	tlsConfig config.ShellyTLSConfig,
+) (*Client, error) {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   timeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   timeout,
+		ExpectContinueTimeout: time.Second,
+	}
+
+	if tlsConfigured(tlsConfig) {
+		clientTLSConfig, err := loadTLSConfig(tlsConfig)
+		if err != nil {
+			return nil, err
+		}
+
+		transport.TLSClientConfig = clientTLSConfig
+	}
+
 	return &Client{
 		http: &http.Client{
-			Timeout: timeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        256,
-				MaxIdleConnsPerHost: 8,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			Timeout:   timeout,
+			Transport: transport,
 		},
 		authByIP:                    make(map[string]*deviceAuthState),
 		authenticationThrottleDelay: authenticationThrottleDelay,
 		recoveryByIP:                make(map[string]recoveryState),
 		rebootCooldown:              defaultRebootCooldown,
-	}
+	}, nil
 }
 
 func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus, error) {
 	var status SwitchStatus
 
-	url := fmt.Sprintf(
-		"http://%s/rpc/Switch.GetStatus?id=%d",
-		tool.IP,
-		tool.SwitchID,
+	requestURL, err := rpcURL(
+		tool,
+		"Switch.GetStatus",
+		url.Values{
+			"id": []string{strconv.Itoa(tool.SwitchID)},
+		},
 	)
+	if err != nil {
+		return status, err
+	}
 
-	resp, err := c.doGET(ctx, tool, url)
+	resp, err := c.doGET(ctx, tool, requestURL)
 	if err != nil {
 		return status, err
 	}
@@ -98,14 +157,19 @@ func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus,
 }
 
 func (c *Client) Set(ctx context.Context, tool config.Tool, on bool) error {
-	url := fmt.Sprintf(
-		"http://%s/rpc/Switch.Set?id=%d&on=%t",
-		tool.IP,
-		tool.SwitchID,
-		on,
+	requestURL, err := rpcURL(
+		tool,
+		"Switch.Set",
+		url.Values{
+			"id": []string{strconv.Itoa(tool.SwitchID)},
+			"on": []string{strconv.FormatBool(on)},
+		},
 	)
+	if err != nil {
+		return err
+	}
 
-	resp, err := c.doGET(ctx, tool, url)
+	resp, err := c.doGET(ctx, tool, requestURL)
 	if err != nil {
 		return err
 	}
@@ -124,13 +188,18 @@ func (c *Client) Set(ctx context.Context, tool config.Tool, on bool) error {
 // Reboot requests a Shelly device restart. It intentionally does not invoke
 // automatic recovery if the reboot request itself fails, preventing recursion.
 func (c *Client) Reboot(ctx context.Context, tool config.Tool) error {
-	url := fmt.Sprintf(
-		"http://%s/rpc/Shelly.Reboot?delay_ms=%d",
-		tool.IP,
-		rebootDelay.Milliseconds(),
+	requestURL, err := rpcURL(
+		tool,
+		"Shelly.Reboot",
+		url.Values{
+			"delay_ms": []string{strconv.FormatInt(rebootDelay.Milliseconds(), 10)},
+		},
 	)
+	if err != nil {
+		return err
+	}
 
-	resp, err := c.doGET(ctx, tool, url)
+	resp, err := c.doGET(ctx, tool, requestURL)
 	if err != nil {
 		return err
 	}
@@ -253,9 +322,13 @@ func responseHTTPError(operation string, resp *http.Response) error {
 	}
 }
 
-func (c *Client) doGET(ctx context.Context, tool config.Tool, url string) (*http.Response, error) {
+func (c *Client) doGET(
+	ctx context.Context,
+	tool config.Tool,
+	requestURL string,
+) (*http.Response, error) {
 	if tool.Password == nil || strings.TrimSpace(*tool.Password) == "" {
-		return c.doUnauthenticatedGET(ctx, url)
+		return c.doUnauthenticatedGET(ctx, requestURL)
 	}
 
 	username := "admin"
@@ -275,7 +348,7 @@ func (c *Client) doGET(ctx context.Context, tool config.Tool, url string) (*http
 	return c.doAuthenticatedGETLocked(
 		ctx,
 		state,
-		url,
+		requestURL,
 		username,
 		*tool.Password,
 	)
@@ -283,10 +356,10 @@ func (c *Client) doGET(ctx context.Context, tool config.Tool, url string) (*http
 
 func (c *Client) doUnauthenticatedGET(
 	ctx context.Context,
-	url string,
+	requestURL string,
 ) (*http.Response, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := c.sendGET(ctx, url, "")
+		resp, err := c.sendGET(ctx, requestURL, "")
 		if err != nil {
 			return nil, err
 		}
@@ -302,13 +375,13 @@ func (c *Client) doUnauthenticatedGET(
 		}
 	}
 
-	return nil, fmt.Errorf("shelly request retry limit exceeded")
+	return nil, errors.New("shelly request retry limit exceeded")
 }
 
 func (c *Client) doAuthenticatedGETLocked(
 	ctx context.Context,
 	state *deviceAuthState,
-	url string,
+	requestURL string,
 	username string,
 	password string,
 ) (*http.Response, error) {
@@ -324,7 +397,7 @@ func (c *Client) doAuthenticatedGETLocked(
 		authenticatedRequest := state.session != nil
 
 		if authenticatedRequest {
-			uri, err := requestURI(url)
+			uri, err := requestURI(requestURL)
 			if err != nil {
 				return nil, err
 			}
@@ -341,7 +414,7 @@ func (c *Client) doAuthenticatedGETLocked(
 			}
 		}
 
-		resp, err := c.sendGET(ctx, url, authorization)
+		resp, err := c.sendGET(ctx, requestURL, authorization)
 		if err != nil {
 			return nil, err
 		}
@@ -361,7 +434,7 @@ func (c *Client) doAuthenticatedGETLocked(
 
 			if challenge == "" {
 				state.session = nil
-				return nil, fmt.Errorf(
+				return nil, errors.New(
 					"shelly returned 401 but no WWW-Authenticate header",
 				)
 			}
@@ -394,7 +467,7 @@ func (c *Client) doAuthenticatedGETLocked(
 		}
 	}
 
-	return nil, fmt.Errorf("shelly authentication retry limit exceeded")
+	return nil, errors.New("shelly authentication retry limit exceeded")
 }
 
 func (c *Client) authState(deviceKey string) *deviceAuthState {
@@ -412,10 +485,10 @@ func (c *Client) authState(deviceKey string) *deviceAuthState {
 
 func (c *Client) sendGET(
 	ctx context.Context,
-	url string,
+	requestURL string,
 	authorization string,
 ) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -455,4 +528,85 @@ func waitForContext(ctx context.Context, delay time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func tlsConfigured(cfg config.ShellyTLSConfig) bool {
+	return strings.TrimSpace(cfg.ServerCAFile) != "" ||
+		strings.TrimSpace(cfg.ClientCertFile) != "" ||
+		strings.TrimSpace(cfg.ClientKeyFile) != ""
+}
+
+func loadTLSConfig(cfg config.ShellyTLSConfig) (*tls.Config, error) {
+	if strings.TrimSpace(cfg.ServerCAFile) == "" {
+		return nil, errors.New("Shelly TLS server CA file is required")
+	}
+
+	if strings.TrimSpace(cfg.ClientCertFile) == "" {
+		return nil, errors.New("Shelly TLS client certificate file is required")
+	}
+
+	if strings.TrimSpace(cfg.ClientKeyFile) == "" {
+		return nil, errors.New("Shelly TLS client key file is required")
+	}
+
+	caPEM, err := os.ReadFile(cfg.ServerCAFile)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"read Shelly server CA %q: %w",
+			cfg.ServerCAFile,
+			err,
+		)
+	}
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("Shelly server CA file contains no valid certificates")
+	}
+
+	clientCertificate, err := tls.LoadX509KeyPair(
+		cfg.ClientCertFile,
+		cfg.ClientKeyFile,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load gateway client certificate and key: %w", err)
+	}
+
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		RootCAs:      roots,
+		Certificates: []tls.Certificate{clientCertificate},
+	}, nil
+}
+
+func rpcURL(
+	tool config.Tool,
+	method string,
+	query url.Values,
+) (string, error) {
+	scheme := config.ToolProtocol(tool)
+	host := strings.TrimSpace(tool.IP)
+
+	if host == "" {
+		return "", errors.New("Shelly host is empty")
+	}
+
+	if strings.Contains(host, "://") {
+		return "", fmt.Errorf(
+			"Shelly host %q must not include a URL scheme",
+			host,
+		)
+	}
+
+	if strings.TrimSpace(method) == "" {
+		return "", errors.New("Shelly RPC method is empty")
+	}
+
+	u := url.URL{
+		Scheme:   scheme,
+		Host:     host,
+		Path:     "/rpc/" + method,
+		RawQuery: query.Encode(),
+	}
+
+	return u.String(), nil
 }

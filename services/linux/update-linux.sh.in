@@ -64,38 +64,92 @@ echo "Checking latest release for ${APP}..."
 echo "Architecture: linux-${ARCH}"
 echo
 
-echo "Downloading binary..."
-curl -fL --retry 3 --connect-timeout 10 \
-  -o "${TMP_DIR}/${ASSET}" \
-  "$BIN_URL"
-
-echo "Downloading checksum..."
-curl -fL --retry 3 --connect-timeout 10 \
-  -o "${TMP_DIR}/${ASSET}.sha256" \
+# Download the small checksum file first. Do not download the binary until
+# the installed binary has been shown to differ from the latest release.
+echo "Downloading latest checksum..."
+curl \
+  --fail \
+  --location \
+  --retry 3 \
+  --connect-timeout 10 \
+  --output "${TMP_DIR}/${ASSET}.sha256" \
   "$SHA_URL"
 
-echo "Verifying checksum..."
-(
-  cd "$TMP_DIR"
-  sha256sum -c "${ASSET}.sha256"
-)
+EXPECTED_SHA="$(
+  awk 'NF >= 1 { print $1; exit }' \
+    "${TMP_DIR}/${ASSET}.sha256"
+)"
+
+if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "ERROR: Release checksum file contains an invalid SHA-256 value."
+  exit 1
+fi
+
+EXPECTED_SHA="${EXPECTED_SHA,,}"
+
+if [[ -f "$CURRENT_BIN" ]]; then
+  CURRENT_SHA="$(
+    sha256sum "$CURRENT_BIN" |
+      awk '{ print $1 }'
+  )"
+
+  CURRENT_SHA="${CURRENT_SHA,,}"
+
+  echo "Installed checksum: $CURRENT_SHA"
+  echo "Latest checksum:    $EXPECTED_SHA"
+
+  if [[ "$CURRENT_SHA" == "$EXPECTED_SHA" ]]; then
+    echo "Already running the latest binary."
+    exit 0
+  fi
+
+  echo "A newer or different binary is available."
+else
+  echo "No installed binary was found."
+fi
+
+echo
+echo "Downloading latest binary..."
+curl \
+  --fail \
+  --location \
+  --retry 3 \
+  --connect-timeout 10 \
+  --output "${TMP_DIR}/${ASSET}" \
+  "$BIN_URL"
+
+echo "Verifying downloaded binary..."
+DOWNLOADED_SHA="$(
+  sha256sum "${TMP_DIR}/${ASSET}" |
+    awk '{ print $1 }'
+)"
+
+DOWNLOADED_SHA="${DOWNLOADED_SHA,,}"
+
+if [[ "$DOWNLOADED_SHA" != "$EXPECTED_SHA" ]]; then
+  echo "ERROR: Downloaded binary checksum does not match the release checksum."
+  echo "Expected: $EXPECTED_SHA"
+  echo "Received: $DOWNLOADED_SHA"
+  exit 1
+fi
+
+echo "Checksum verified."
 
 chmod 0755 "${TMP_DIR}/${ASSET}"
 
-if [[ -f "$CURRENT_BIN" ]] && cmp -s "${TMP_DIR}/${ASSET}" "$CURRENT_BIN"; then
-  echo "Already running the latest binary."
-  exit 0
-fi
-
 BACKUP=""
+
 if [[ -f "$CURRENT_BIN" ]]; then
   BACKUP="${INSTALL_DIR}/${APP}.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+
   echo "Backing up current binary:"
   echo "  $BACKUP"
+
   cp -a "$CURRENT_BIN" "$BACKUP"
 fi
 
 WAS_ACTIVE=0
+
 if systemctl is-active --quiet "$SERVICE_NAME"; then
   WAS_ACTIVE=1
 fi
@@ -104,12 +158,44 @@ echo "Stopping service..."
 systemctl stop "$SERVICE_NAME" || true
 
 echo "Installing latest binary..."
-install -o root -g root -m 0755 \
+install \
+  -o root \
+  -g root \
+  -m 0755 \
   "${TMP_DIR}/${ASSET}" \
   "$CURRENT_BIN"
 
+# Verify that the installed binary is exactly the release binary.
+INSTALLED_SHA="$(
+  sha256sum "$CURRENT_BIN" |
+    awk '{ print $1 }'
+)"
+
+INSTALLED_SHA="${INSTALLED_SHA,,}"
+
+if [[ "$INSTALLED_SHA" != "$EXPECTED_SHA" ]]; then
+  echo "ERROR: Installed binary checksum is incorrect."
+
+  if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
+    echo "Rolling back to previous binary..."
+    install \
+      -o root \
+      -g root \
+      -m 0755 \
+      "$BACKUP" \
+      "$CURRENT_BIN"
+  fi
+
+  if [[ "$WAS_ACTIVE" -eq 1 ]]; then
+    systemctl start "$SERVICE_NAME" || true
+  fi
+
+  exit 1
+fi
+
 if [[ "$WAS_ACTIVE" -eq 1 ]]; then
   echo "Starting service..."
+
   if systemctl start "$SERVICE_NAME"; then
     echo "Update complete."
     systemctl --no-pager --full status "$SERVICE_NAME" || true
@@ -118,12 +204,20 @@ if [[ "$WAS_ACTIVE" -eq 1 ]]; then
 
     if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
       echo "Rolling back to previous binary..."
-      install -o root -g root -m 0755 "$BACKUP" "$CURRENT_BIN"
+
+      install \
+        -o root \
+        -g root \
+        -m 0755 \
+        "$BACKUP" \
+        "$CURRENT_BIN"
+
       systemctl start "$SERVICE_NAME" || true
     fi
 
     exit 1
   fi
 else
-  echo "Update complete. Service was not active before update, so it was not restarted."
+  echo "Update complete."
+  echo "Service was not active before the update, so it was not restarted."
 fi

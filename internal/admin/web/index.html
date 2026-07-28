@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="en">
 
 <head>
     <meta charset="utf-8">
@@ -9,7 +9,7 @@
 
     <link rel="stylesheet" href="style.css">
     <link rel="manifest" href="site.webmanifest">
-    <link rel="icon" href="assets/favicon.svg" />
+    <link rel="icon" href="assets/favicon.svg">
 </head>
 
 <body>
@@ -25,6 +25,73 @@
 
     <details class="table-section" open>
         <summary>Config</summary>
+
+        <details class="table-section">
+            <summary>Shelly Mutual TLS</summary>
+
+            <div class="table-container">
+                <table id="tlsSettings">
+                    <thead>
+                        <tr>
+                            <th>Setting</th>
+                            <th>Gateway File Path</th>
+                        </tr>
+                    </thead>
+
+                    <tbody>
+                        <tr>
+                            <td>Trusted Shelly server CA</td>
+                            <td>
+                                <input
+                                    id="serverCAFile"
+                                    type="text"
+                                    data-tls-field="server_ca_file"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    placeholder="/etc/fbs-interlock-gateway/tls/server-ca.crt"
+                                    aria-label="Trusted Shelly server CA file"
+                                >
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td>Gateway client certificate</td>
+                            <td>
+                                <input
+                                    id="clientCertFile"
+                                    type="text"
+                                    data-tls-field="client_cert_file"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    placeholder="/etc/fbs-interlock-gateway/tls/gateway-client.crt"
+                                    aria-label="Gateway client certificate file"
+                                >
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td>Gateway client private key</td>
+                            <td>
+                                <input
+                                    id="clientKeyFile"
+                                    type="text"
+                                    data-tls-field="client_key_file"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    placeholder="/etc/fbs-interlock-gateway/tls/gateway-client.key"
+                                    aria-label="Gateway client private-key file"
+                                >
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </details>
+
+        <datalist id="protocolOptions">
+            <option value="http"></option>
+            <option value="https"></option>
+        </datalist>
 
         <div class="table-container">
             <table id="configTable"></table>
