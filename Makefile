@@ -179,8 +179,6 @@ endif
 	ca \
 	gateway-cert \
 	shelly-cert \
-	upload-shelly-cert \
-	verify-tls \
 	clean
 
 # =========================
@@ -362,7 +360,7 @@ init-config:
 			'bind: 0.0.0.0' \
 			'' \
 			'defaults:' \
-			'  timeout_ms: 10000' \
+			'  timeout_ms: 3000' \
 			'  safe_state_on_error: "off"' \
 			'  shelly_tls:' \
 			'    server_ca_file: "./tls/server-ca.crt"' \
@@ -623,14 +621,6 @@ gateway-cert:
 shelly-cert:
 	@chmod +x scripts/tls/create-shelly-cert.sh
 	@./scripts/tls/create-shelly-cert.sh
-
-upload-shelly-cert:
-	@chmod +x scripts/tls/upload-shelly-tls.sh
-	@./scripts/tls/upload-shelly-tls.sh
-
-verify-tls:
-	@chmod +x scripts/tls/verify-shelly-tls.sh
-	@./scripts/tls/verify-shelly-tls.sh
 
 clean:
 	rm -rf "$(BUILD_DIR)"
