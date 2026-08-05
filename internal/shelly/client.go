@@ -32,8 +32,7 @@ const (
 	maxStatusAttempts = 2
 	statusRetryDelay  = 150 * time.Millisecond
 
-	maxDialTimeout         = 3 * time.Second
-	maxTLSHandshakeTimeout = 5 * time.Second
+	maxDialTimeout = 3 * time.Second
 
 	rebootDelay           = 500 * time.Millisecond
 	rebootRequestTimeout  = 6 * time.Second
@@ -124,7 +123,7 @@ func newClient(
 		MaxIdleConnsPerHost:   2,
 		MaxConnsPerHost:       2,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   phaseTimeout(timeout, maxTLSHandshakeTimeout),
+		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: time.Second,
 	}
