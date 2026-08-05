@@ -25,9 +25,9 @@ const (
 	maxConfigRequestBytes = 1 << 20 // 1 MiB
 	maxHeaderBytes        = 32 << 10
 
-	maxConcurrentStatusRequests = 4
-	statusCacheTTL              = 2 * time.Second
-	statusRefreshTimeout        = 2 * time.Minute
+	maxConcurrentStatusRequests   = 4
+	statusRefreshTimeout          = 2 * time.Minute
+	statusRefreshInProgressHeader = "X-Status-Refresh-In-Progress"
 
 	readHeaderTimeout = 2 * time.Second
 	readTimeout       = 10 * time.Second
@@ -58,7 +58,6 @@ type Server struct {
 
 	statusMu              sync.Mutex
 	statusCache           []ToolStatus
-	statusCacheAt         time.Time
 	statusRefreshInFlight bool
 }
 
@@ -456,11 +455,30 @@ func (s *Server) handleStatus(
 		return
 	}
 
-	results := s.statusSnapshot()
+	refreshRequested := r.URL.Query().Get("refresh") == "1"
+
+	results, refreshInProgress := s.statusSnapshot(
+		refreshRequested,
+	)
+
+	if refreshInProgress {
+		w.Header().Set(
+			statusRefreshInProgressHeader,
+			"true",
+		)
+	} else {
+		w.Header().Set(
+			statusRefreshInProgressHeader,
+			"false",
+		)
+	}
+
 	writeJSON(w, http.StatusOK, results)
 }
 
-func (s *Server) statusSnapshot() []ToolStatus {
+func (s *Server) statusSnapshot(
+	refreshRequested bool,
+) ([]ToolStatus, bool) {
 	placeholder := s.statusPlaceholder()
 
 	s.statusMu.Lock()
@@ -469,17 +487,15 @@ func (s *Server) statusSnapshot() []ToolStatus {
 		s.statusCache = placeholder
 	}
 
-	cached := cloneToolStatuses(s.statusCache)
-
-	cacheFresh := !s.statusCacheAt.IsZero() &&
-		time.Since(s.statusCacheAt) < statusCacheTTL
-
-	startRefresh := !cacheFresh &&
+	startRefresh := refreshRequested &&
 		!s.statusRefreshInFlight
 
 	if startRefresh {
 		s.statusRefreshInFlight = true
 	}
+
+	cached := cloneToolStatuses(s.statusCache)
+	refreshInProgress := s.statusRefreshInFlight
 
 	s.statusMu.Unlock()
 
@@ -487,7 +503,7 @@ func (s *Server) statusSnapshot() []ToolStatus {
 		go s.refreshStatuses()
 	}
 
-	return cached
+	return cached, refreshInProgress
 }
 
 func (s *Server) statusPlaceholder() []ToolStatus {
@@ -509,7 +525,7 @@ func (s *Server) statusPlaceholder() []ToolStatus {
 		if tool.Enabled {
 			results[i].Connected = false
 			results[i].Output = safeOutput
-			results[i].Error = "status refresh in progress"
+			results[i].Error = "status not yet refreshed"
 		}
 	}
 
@@ -529,7 +545,6 @@ func (s *Server) refreshStatuses() {
 
 	if err == nil {
 		s.statusCache = cloneToolStatuses(results)
-		s.statusCacheAt = time.Now()
 	}
 
 	s.statusRefreshInFlight = false

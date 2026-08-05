@@ -659,77 +659,166 @@ func TestHandleRestartRejectsUnsupportedMethod(t *testing.T) {
 	}
 }
 
-func TestConcurrentStatusRequestsShareOneRefresh(t *testing.T) {
-	store := &fakeConfigStore{cfg: config.Config{Tools: []config.Tool{{
-		InterlockName: "TEST",
-		IP:            "192.0.2.10",
-		Port:          8081,
-		SwitchID:      0,
-		Enabled:       true,
-	}}}}
+func waitForStatusRefresh(
+	t *testing.T,
+	server *Server,
+) {
+	t.Helper()
 
-	var calls atomic.Int32
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	server := New(
-		"127.0.0.1:0",
-		store,
-		fakeStatusClient{getStatus: func(ctx context.Context, tool config.Tool) (shelly.SwitchStatus, error) {
-			calls.Add(1)
-			started <- struct{}{}
-			select {
-			case <-release:
-				return shelly.SwitchStatus{Output: true}, nil
-			case <-ctx.Done():
-				return shelly.SwitchStatus{}, ctx.Err()
-			}
-		}},
-		nil,
-	)
+	deadline := time.Now().Add(time.Second)
 
-	first := httptest.NewRecorder()
-	second := httptest.NewRecorder()
-	done := make(chan struct{}, 2)
+	for {
+		server.statusMu.Lock()
+		inFlight := server.statusRefreshInFlight
+		server.statusMu.Unlock()
 
-	go func() {
-		server.handleStatus(first, httptest.NewRequest(http.MethodGet, "/api/status", nil))
-		done <- struct{}{}
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("first status refresh did not start")
-	}
-
-	go func() {
-		server.handleStatus(second, httptest.NewRequest(http.MethodGet, "/api/status", nil))
-		done <- struct{}{}
-	}()
-
-	time.Sleep(25 * time.Millisecond)
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("GetStatus calls while refresh in flight = %d, want 1", got)
-	}
-
-	close(release)
-	for i := 0; i < 2; i++ {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("status request did not finish")
+		if !inFlight {
+			return
 		}
-	}
 
-	if first.Code != http.StatusOK || second.Code != http.StatusOK {
-		t.Fatalf("response codes = %d and %d, want 200 and 200", first.Code, second.Code)
-	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("GetStatus calls = %d, want 1", got)
+		if time.Now().After(deadline) {
+			t.Fatal(
+				"status refresh did not complete within one second",
+			)
+		}
+
+		time.Sleep(time.Millisecond)
 	}
 }
 
-func TestStatusSnapshotUsesShortCache(t *testing.T) {
+func TestStatusReadDoesNotRefreshDevices(t *testing.T) {
+	store := &fakeConfigStore{
+		safeOutput: true,
+		cfg: config.Config{
+			Tools: []config.Tool{
+				{
+					InterlockName: "TEST",
+					IP:            "192.0.2.10",
+					Port:          8081,
+					SwitchID:      0,
+					Enabled:       true,
+				},
+			},
+		},
+	}
+
+	var calls atomic.Int32
+	called := make(chan struct{}, 1)
+
+	server := New(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{
+			getStatus: func(
+				context.Context,
+				config.Tool,
+			) (shelly.SwitchStatus, error) {
+				calls.Add(1)
+
+				select {
+				case called <- struct{}{}:
+				default:
+				}
+
+				return shelly.SwitchStatus{
+					Output: true,
+				}, nil
+			},
+		},
+		nil,
+	)
+
+	response := httptest.NewRecorder()
+
+	server.handleStatus(
+		response,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/status",
+			nil,
+		),
+	)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"response code = %d, want %d",
+			response.Code,
+			http.StatusOK,
+		)
+	}
+
+	if got := response.Header().Get(
+		statusRefreshInProgressHeader,
+	); got != "false" {
+		t.Fatalf(
+			"%s = %q, want %q",
+			statusRefreshInProgressHeader,
+			got,
+			"false",
+		)
+	}
+
+	// Give an incorrectly started background refresh enough time to call
+	// GetStatus.
+	select {
+	case <-called:
+		t.Fatal(
+			"ordinary status read unexpectedly queried a Shelly",
+		)
+
+	case <-time.After(25 * time.Millisecond):
+		// Expected.
+	}
+
+	if got := calls.Load(); got != 0 {
+		t.Fatalf(
+			"GetStatus calls = %d, want 0",
+			got,
+		)
+	}
+
+	var statuses []ToolStatus
+
+	if err := json.NewDecoder(response.Body).Decode(
+		&statuses,
+	); err != nil {
+		t.Fatalf(
+			"failed to decode status response: %v",
+			err,
+		)
+	}
+
+	if len(statuses) != 1 {
+		t.Fatalf(
+			"status count = %d, want 1",
+			len(statuses),
+		)
+	}
+
+	status := statuses[0]
+
+	if status.Connected {
+		t.Fatal(
+			"placeholder status should not be connected",
+		)
+	}
+
+	if !status.Output {
+		t.Fatal(
+			"placeholder status should use safe output=true",
+		)
+	}
+
+	if status.Error != "status not yet refreshed" {
+		t.Fatalf(
+			"placeholder error = %q, want %q",
+			status.Error,
+			"status not yet refreshed",
+		)
+	}
+}
+
+func TestExplicitStatusRefreshPopulatesCache(t *testing.T) {
 	store := &fakeConfigStore{
 		cfg: config.Config{
 			Tools: []config.Tool{
@@ -764,65 +853,300 @@ func TestStatusSnapshotUsesShortCache(t *testing.T) {
 		nil,
 	)
 
-	// The first request returns immediately and starts the refresh in the
-	// background.
+	refreshResponse := httptest.NewRecorder()
+
+	server.handleStatus(
+		refreshResponse,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/status?refresh=1",
+			nil,
+		),
+	)
+
+	if refreshResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"refresh response code = %d, want %d",
+			refreshResponse.Code,
+			http.StatusOK,
+		)
+	}
+
+	if got := refreshResponse.Header().Get(
+		statusRefreshInProgressHeader,
+	); got != "true" {
+		t.Fatalf(
+			"%s = %q, want %q",
+			statusRefreshInProgressHeader,
+			got,
+			"true",
+		)
+	}
+
+	waitForStatusRefresh(t, server)
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf(
+			"GetStatus calls after explicit refresh = %d, want 1",
+			got,
+		)
+	}
+
+	cachedResponse := httptest.NewRecorder()
+
+	server.handleStatus(
+		cachedResponse,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/status",
+			nil,
+		),
+	)
+
+	if cachedResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"cached response code = %d, want %d",
+			cachedResponse.Code,
+			http.StatusOK,
+		)
+	}
+
+	if got := cachedResponse.Header().Get(
+		statusRefreshInProgressHeader,
+	); got != "false" {
+		t.Fatalf(
+			"%s = %q, want %q",
+			statusRefreshInProgressHeader,
+			got,
+			"false",
+		)
+	}
+
+	var statuses []ToolStatus
+
+	if err := json.NewDecoder(cachedResponse.Body).Decode(
+		&statuses,
+	); err != nil {
+		t.Fatalf(
+			"failed to decode cached status response: %v",
+			err,
+		)
+	}
+
+	if len(statuses) != 1 {
+		t.Fatalf(
+			"status count = %d, want 1",
+			len(statuses),
+		)
+	}
+
+	status := statuses[0]
+
+	if !status.Connected {
+		t.Fatal(
+			"cached status should report connected=true",
+		)
+	}
+
+	if !status.Output {
+		t.Fatal(
+			"cached status should report output=true",
+		)
+	}
+
+	if status.Error != "" {
+		t.Fatalf(
+			"cached status error = %q, want empty",
+			status.Error,
+		)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf(
+			"ordinary cached read caused GetStatus calls = %d, want 1 total",
+			got,
+		)
+	}
+
+	// A second explicitly requested refresh should perform one additional
+	// Shelly query.
+	secondRefreshResponse := httptest.NewRecorder()
+
+	server.handleStatus(
+		secondRefreshResponse,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/status?refresh=1",
+			nil,
+		),
+	)
+
+	if got := secondRefreshResponse.Header().Get(
+		statusRefreshInProgressHeader,
+	); got != "true" {
+		t.Fatalf(
+			"second refresh %s = %q, want %q",
+			statusRefreshInProgressHeader,
+			got,
+			"true",
+		)
+	}
+
+	waitForStatusRefresh(t, server)
+
+	if got := calls.Load(); got != 2 {
+		t.Fatalf(
+			"GetStatus calls after second explicit refresh = %d, want 2",
+			got,
+		)
+	}
+}
+
+func TestConcurrentExplicitStatusRefreshesShareOneRefresh(
+	t *testing.T,
+) {
+	store := &fakeConfigStore{
+		cfg: config.Config{
+			Tools: []config.Tool{
+				{
+					InterlockName: "TEST",
+					IP:            "192.0.2.10",
+					Port:          8081,
+					SwitchID:      0,
+					Enabled:       true,
+				},
+			},
+		},
+	}
+
+	var calls atomic.Int32
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	server := New(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{
+			getStatus: func(
+				ctx context.Context,
+				tool config.Tool,
+			) (shelly.SwitchStatus, error) {
+				calls.Add(1)
+
+				select {
+				case started <- struct{}{}:
+				default:
+				}
+
+				select {
+				case <-release:
+					return shelly.SwitchStatus{
+						Output: true,
+					}, nil
+
+				case <-ctx.Done():
+					return shelly.SwitchStatus{},
+						ctx.Err()
+				}
+			},
+		},
+		nil,
+	)
+
 	first := httptest.NewRecorder()
 
 	server.handleStatus(
 		first,
 		httptest.NewRequest(
 			http.MethodGet,
-			"/api/status",
+			"/api/status?refresh=1",
 			nil,
 		),
 	)
 
 	if first.Code != http.StatusOK {
 		t.Fatalf(
-			"first response code = %d, want 200",
+			"first response code = %d, want %d",
 			first.Code,
+			http.StatusOK,
 		)
 	}
 
-	// Wait until the asynchronous refresh has completed and populated the
-	// cache. Read the state under the same mutex used by the server.
-	deadline := time.Now().Add(time.Second)
-
-	for {
-		server.statusMu.Lock()
-
-		refreshComplete :=
-			!server.statusRefreshInFlight &&
-				!server.statusCacheAt.IsZero()
-
-		server.statusMu.Unlock()
-
-		if refreshComplete {
-			break
-		}
-
-		if time.Now().After(deadline) {
-			t.Fatal(
-				"status refresh did not complete within one second",
-			)
-		}
-
-		time.Sleep(time.Millisecond)
-	}
-
-	if got := calls.Load(); got != 1 {
+	if got := first.Header().Get(
+		statusRefreshInProgressHeader,
+	); got != "true" {
 		t.Fatalf(
-			"GetStatus calls after initial refresh = %d, want 1",
+			"first %s = %q, want %q",
+			statusRefreshInProgressHeader,
 			got,
+			"true",
 		)
 	}
 
-	// This request occurs within statusCacheTTL and must use the completed
-	// cache rather than starting another device request.
+	select {
+	case <-started:
+		// Expected.
+
+	case <-time.After(time.Second):
+		t.Fatal(
+			"first explicit status refresh did not start",
+		)
+	}
+
 	second := httptest.NewRecorder()
 
 	server.handleStatus(
 		second,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/status?refresh=1",
+			nil,
+		),
+	)
+
+	if second.Code != http.StatusOK {
+		t.Fatalf(
+			"second response code = %d, want %d",
+			second.Code,
+			http.StatusOK,
+		)
+	}
+
+	if got := second.Header().Get(
+		statusRefreshInProgressHeader,
+	); got != "true" {
+		t.Fatalf(
+			"second %s = %q, want %q",
+			statusRefreshInProgressHeader,
+			got,
+			"true",
+		)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf(
+			"GetStatus calls while refresh in flight = %d, want 1",
+			got,
+		)
+	}
+
+	close(release)
+	waitForStatusRefresh(t, server)
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf(
+			"GetStatus calls after shared refresh = %d, want 1",
+			got,
+		)
+	}
+
+	// Verify that the completed result was stored and that reading it does
+	// not start another refresh.
+	cached := httptest.NewRecorder()
+
+	server.handleStatus(
+		cached,
 		httptest.NewRequest(
 			http.MethodGet,
 			"/api/status",
@@ -830,16 +1154,20 @@ func TestStatusSnapshotUsesShortCache(t *testing.T) {
 		),
 	)
 
-	if second.Code != http.StatusOK {
+	if got := cached.Header().Get(
+		statusRefreshInProgressHeader,
+	); got != "false" {
 		t.Fatalf(
-			"second response code = %d, want 200",
-			second.Code,
+			"cached %s = %q, want %q",
+			statusRefreshInProgressHeader,
+			got,
+			"false",
 		)
 	}
 
 	if got := calls.Load(); got != 1 {
 		t.Fatalf(
-			"GetStatus calls after cached request = %d, want 1",
+			"cached read caused GetStatus calls = %d, want 1 total",
 			got,
 		)
 	}
