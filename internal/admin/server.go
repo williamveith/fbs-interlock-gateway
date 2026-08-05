@@ -19,6 +19,7 @@ import (
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
 	"github.com/williamveith/fbs-interlock-gateway/internal/shelly"
+	"github.com/williamveith/fbs-interlock-gateway/internal/status"
 )
 
 const (
@@ -54,24 +55,14 @@ type Server struct {
 	addr             string
 	store            ConfigStore
 	statusClient     StatusClient
+	statusStore      *status.Store
 	restartRequested chan<- struct{}
 
 	statusMu              sync.Mutex
-	statusCache           []ToolStatus
 	statusRefreshInFlight bool
 }
 
-type ToolStatus struct {
-	InterlockName string `json:"interlock_name"`
-	IP            string `json:"ip"`
-	Protocol      string `json:"protocol"`
-	Port          int    `json:"port"`
-	SwitchID      int    `json:"switch_id"`
-	Enabled       bool   `json:"enabled"`
-	Connected     bool   `json:"connected"`
-	Output        bool   `json:"output"`
-	Error         string `json:"error,omitempty"`
-}
+type ToolStatus = status.ToolStatus
 
 type adminConfigRequest struct {
 	Bind     string             `json:"bind"`
@@ -128,12 +119,14 @@ func New(
 	addr string,
 	store ConfigStore,
 	statusClient StatusClient,
+	statusStore *status.Store,
 	restartRequested chan<- struct{},
 ) *Server {
 	return &Server{
 		addr:             addr,
 		store:            store,
 		statusClient:     statusClient,
+		statusStore:      statusStore,
 		restartRequested: restartRequested,
 	}
 }
@@ -479,60 +472,28 @@ func (s *Server) handleStatus(
 func (s *Server) statusSnapshot(
 	refreshRequested bool,
 ) ([]ToolStatus, bool) {
-	placeholder := s.statusPlaceholder()
-
 	s.statusMu.Lock()
-
-	if len(s.statusCache) == 0 {
-		s.statusCache = placeholder
-	}
 
 	startRefresh := refreshRequested &&
 		!s.statusRefreshInFlight
 
+	var refreshRevision uint64
 	if startRefresh {
 		s.statusRefreshInFlight = true
+		refreshRevision = s.statusStore.NextRevision()
 	}
 
-	cached := cloneToolStatuses(s.statusCache)
 	refreshInProgress := s.statusRefreshInFlight
-
 	s.statusMu.Unlock()
 
 	if startRefresh {
-		go s.refreshStatuses()
+		go s.refreshStatuses(refreshRevision)
 	}
 
-	return cached, refreshInProgress
+	return s.statusStore.Snapshot(), refreshInProgress
 }
 
-func (s *Server) statusPlaceholder() []ToolStatus {
-	cfg := s.store.ConfigSnapshot()
-	safeOutput := s.store.SafeOutput()
-
-	results := make([]ToolStatus, len(cfg.Tools))
-
-	for i, tool := range cfg.Tools {
-		results[i] = ToolStatus{
-			InterlockName: tool.InterlockName,
-			IP:            tool.IP,
-			Protocol:      config.ToolProtocol(tool),
-			Port:          tool.Port,
-			SwitchID:      tool.SwitchID,
-			Enabled:       tool.Enabled,
-		}
-
-		if tool.Enabled {
-			results[i].Connected = false
-			results[i].Output = safeOutput
-			results[i].Error = "status not yet refreshed"
-		}
-	}
-
-	return results
-}
-
-func (s *Server) refreshStatuses() {
+func (s *Server) refreshStatuses(revision uint64) {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		statusRefreshTimeout,
@@ -540,13 +501,13 @@ func (s *Server) refreshStatuses() {
 	defer cancel()
 
 	results, err := s.collectStatuses(ctx)
-
-	s.statusMu.Lock()
-
 	if err == nil {
-		s.statusCache = cloneToolStatuses(results)
+		for _, result := range results {
+			s.statusStore.Record(result, revision)
+		}
 	}
 
+	s.statusMu.Lock()
 	s.statusRefreshInFlight = false
 	s.statusMu.Unlock()
 
@@ -639,10 +600,6 @@ sendJobs:
 	}
 
 	return results, nil
-}
-
-func cloneToolStatuses(statuses []ToolStatus) []ToolStatus {
-	return append([]ToolStatus(nil), statuses...)
 }
 
 func (s *Server) handleRestart(

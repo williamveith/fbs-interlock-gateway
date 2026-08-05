@@ -15,6 +15,7 @@ import (
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
 	"github.com/williamveith/fbs-interlock-gateway/internal/shelly"
+	statusstore "github.com/williamveith/fbs-interlock-gateway/internal/status"
 )
 
 type fakeConfigStore struct {
@@ -59,6 +60,26 @@ func (f fakeStatusClient) GetStatus(
 	return f.getStatus(ctx, tool)
 }
 
+func newTestAdminServer(
+	addr string,
+	store *fakeConfigStore,
+	statusClient StatusClient,
+	restartRequested chan<- struct{},
+) *Server {
+	sharedStatus := statusstore.New(
+		store.ConfigSnapshot(),
+		store.SafeOutput(),
+	)
+
+	return New(
+		addr,
+		store,
+		statusClient,
+		sharedStatus,
+		restartRequested,
+	)
+}
+
 func TestHandleConfigGet(t *testing.T) {
 	stored := config.Config{
 		Bind: "127.0.0.1",
@@ -96,7 +117,7 @@ func TestHandleConfigGet(t *testing.T) {
 
 	store := &fakeConfigStore{cfg: stored}
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -194,7 +215,7 @@ func TestHandleConfigPut(t *testing.T) {
 
 	store := &fakeConfigStore{}
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -260,7 +281,7 @@ func TestHandleConfigPut(t *testing.T) {
 func TestHandleConfigPutRejectsInvalidJSON(t *testing.T) {
 	store := &fakeConfigStore{}
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -312,7 +333,7 @@ func TestHandleConfigPutReturnsStoreError(t *testing.T) {
 		updateErr: errors.New("configuration rejected"),
 	}
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -365,7 +386,7 @@ func TestHandleConfigPutReturnsStoreError(t *testing.T) {
 func TestHandleConfigRejectsUnsupportedMethod(t *testing.T) {
 	store := &fakeConfigStore{}
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -459,7 +480,7 @@ func TestCollectStatuses(t *testing.T) {
 		},
 	}
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		statusClient,
@@ -563,7 +584,7 @@ func TestCollectStatuses(t *testing.T) {
 func TestHandleRestart(t *testing.T) {
 	restartRequested := make(chan struct{}, 1)
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		&fakeConfigStore{},
 		fakeStatusClient{
@@ -617,7 +638,7 @@ func TestHandleRestart(t *testing.T) {
 func TestHandleRestartRejectsUnsupportedMethod(t *testing.T) {
 	restartRequested := make(chan struct{}, 1)
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		&fakeConfigStore{},
 		fakeStatusClient{
@@ -705,7 +726,7 @@ func TestStatusReadDoesNotRefreshDevices(t *testing.T) {
 	var calls atomic.Int32
 	called := make(chan struct{}, 1)
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -835,7 +856,7 @@ func TestExplicitStatusRefreshPopulatesCache(t *testing.T) {
 
 	var calls atomic.Int32
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -1024,7 +1045,7 @@ func TestConcurrentExplicitStatusRefreshesShareOneRefresh(
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 
-	server := New(
+	server := newTestAdminServer(
 		"127.0.0.1:0",
 		store,
 		fakeStatusClient{
@@ -1170,5 +1191,78 @@ func TestConcurrentExplicitStatusRefreshesShareOneRefresh(
 			"cached read caused GetStatus calls = %d, want 1 total",
 			got,
 		)
+	}
+}
+
+func TestStatusReadReturnsSharedStoreUpdate(t *testing.T) {
+	store := &fakeConfigStore{
+		cfg: config.Config{
+			Tools: []config.Tool{
+				{
+					InterlockName: "TEST",
+					IP:            "192.0.2.10",
+					Port:          8081,
+					SwitchID:      0,
+					Enabled:       true,
+				},
+			},
+		},
+	}
+
+	sharedStatus := statusstore.New(
+		store.ConfigSnapshot(),
+		store.SafeOutput(),
+	)
+	tool := store.cfg.Tools[0]
+	sharedStatus.RecordSuccess(
+		tool,
+		true,
+		sharedStatus.NextRevision(),
+	)
+
+	server := New(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{
+			getStatus: func(
+				context.Context,
+				config.Tool,
+			) (shelly.SwitchStatus, error) {
+				t.Fatal("cache-only status read queried a Shelly")
+				return shelly.SwitchStatus{}, nil
+			},
+		},
+		sharedStatus,
+		nil,
+	)
+
+	response := httptest.NewRecorder()
+	server.handleStatus(
+		response,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/status",
+			nil,
+		),
+	)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"response code = %d, want %d",
+			response.Code,
+			http.StatusOK,
+		)
+	}
+
+	var rows []ToolStatus
+	if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("status count = %d, want 1", len(rows))
+	}
+	if !rows[0].Connected || !rows[0].Output || rows[0].Error != "" {
+		t.Fatalf("shared status row = %#v", rows[0])
 	}
 }

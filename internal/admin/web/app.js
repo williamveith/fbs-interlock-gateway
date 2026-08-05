@@ -5,6 +5,7 @@
 // =========================
 
 const STATUS_REFRESH_CHECK_INTERVAL_MS = 1000;
+const STATUS_CACHE_POLL_INTERVAL_MS = 3000;
 const DEFAULT_STARTING_PORT = 8081;
 const MIN_PORT = 8081;
 const MAX_PORT = 8981;
@@ -48,6 +49,7 @@ let statusRequestInProgress = false;
 let configRequestInProgress = false;
 let saveRequestInProgress = false;
 let statusRefreshWorkflowInProgress = false;
+let statusCacheIntervalID = null;
 
 // =========================
 // GENERAL HELPERS
@@ -1187,6 +1189,36 @@ async function saveConfig() {
 }
 
 // =========================
+// PASSIVE STATUS UPDATES
+// =========================
+
+function startStatusCachePolling() {
+    if (statusCacheIntervalID !== null) {
+        window.clearInterval(statusCacheIntervalID);
+    }
+
+    statusCacheIntervalID = window.setInterval(() => {
+        if (
+            document.hidden ||
+            statusRefreshWorkflowInProgress
+        ) {
+            return;
+        }
+
+        void loadStatus();
+    }, STATUS_CACHE_POLL_INTERVAL_MS);
+}
+
+function handleVisibilityChange() {
+    if (
+        !document.hidden &&
+        !statusRefreshWorkflowInProgress
+    ) {
+        void loadStatus();
+    }
+}
+
+// =========================
 // INITIALIZATION
 // =========================
 
@@ -1194,10 +1226,17 @@ async function initialize() {
     enableConfigEventDelegation();
     enableTLSConfigEditing();
 
+    document.addEventListener(
+        'visibilitychange',
+        handleVisibilityChange
+    );
+
     await Promise.allSettled([
         loadConfig(),
         refreshStatus()
     ]);
+
+    startStatusCachePolling();
 }
 
 void initialize();
