@@ -4,7 +4,7 @@
 // CONSTANTS
 // =========================
 
-const STATUS_REFRESH_INTERVAL_MS = 3000;
+const STATUS_REFRESH_CHECK_INTERVAL_MS = 1000;
 const DEFAULT_STARTING_PORT = 8081;
 const MIN_PORT = 8081;
 const MAX_PORT = 8981;
@@ -47,7 +47,7 @@ let config = null;
 let statusRequestInProgress = false;
 let configRequestInProgress = false;
 let saveRequestInProgress = false;
-let statusIntervalID = null;
+let statusRefreshWorkflowInProgress = false;
 
 // =========================
 // GENERAL HELPERS
@@ -59,6 +59,12 @@ function getErrorMessage(error) {
     }
 
     return String(error);
+}
+
+function delay(milliseconds) {
+    return new Promise(resolve => {
+        window.setTimeout(resolve, milliseconds);
+    });
 }
 
 async function readResponseText(response) {
@@ -237,6 +243,10 @@ function getSaveConfigButton() {
     return document.querySelector('button[onclick="saveConfig()"]');
 }
 
+function getRefreshStatusButton() {
+    return document.getElementById('refreshStatusButton');
+}
+
 function normalizeProtocol(value) {
     return String(value ?? '').trim().toLowerCase() === 'https'
         ? 'https'
@@ -369,17 +379,19 @@ async function loadConfig() {
 // STATUS LOADING
 // =========================
 
-async function loadStatus() {
+async function loadStatus({ requestRefresh = false } = {}) {
     if (statusRequestInProgress || document.hidden) {
-        return;
+        return false;
     }
 
     statusRequestInProgress = true;
 
-    const table = document.getElementById('statusTable');
-
     try {
-        const response = await fetch('/api/status', {
+        const endpoint = requestRefresh
+            ? '/api/status?refresh=1'
+            : '/api/status';
+
+        const response = await fetch(endpoint, {
             method: 'GET',
             cache: 'no-store',
             headers: {
@@ -387,24 +399,63 @@ async function loadStatus() {
             }
         });
 
+        const refreshInProgress =
+            response.headers.get(
+                'X-Status-Refresh-In-Progress'
+            ) === 'true';
+
         const rows = await readJSONResponse(
             response,
             'Loading live status'
         );
 
         if (!Array.isArray(rows)) {
-            throw new Error('Status response has an invalid structure');
+            throw new Error(
+                'Status response has an invalid structure'
+            );
         }
 
         renderStatus(rows);
+        return refreshInProgress;
     } catch (error) {
         const message = getErrorMessage(error);
 
         console.error('Failed to load live status:', error);
+        renderStatusError(
+            `Unable to load live status: ${message}`
+        );
 
-        renderStatusError(`Unable to load live status: ${message}`);
+        return false;
     } finally {
         statusRequestInProgress = false;
+    }
+}
+
+async function refreshStatus() {
+    if (
+        statusRefreshWorkflowInProgress ||
+        document.hidden
+    ) {
+        return;
+    }
+
+    statusRefreshWorkflowInProgress = true;
+
+    const button = getRefreshStatusButton();
+    setButtonState(button, true, 'Refreshing...');
+
+    try {
+        let refreshInProgress = await loadStatus({
+            requestRefresh: true
+        });
+
+        while (refreshInProgress && !document.hidden) {
+            await delay(STATUS_REFRESH_CHECK_INTERVAL_MS);
+            refreshInProgress = await loadStatus();
+        }
+    } finally {
+        statusRefreshWorkflowInProgress = false;
+        setButtonState(button, false);
     }
 }
 
@@ -1136,26 +1187,6 @@ async function saveConfig() {
 }
 
 // =========================
-// STATUS POLLING
-// =========================
-
-function startStatusPolling() {
-    if (statusIntervalID !== null) {
-        window.clearInterval(statusIntervalID);
-    }
-
-    statusIntervalID = window.setInterval(() => {
-        void loadStatus();
-    }, STATUS_REFRESH_INTERVAL_MS);
-}
-
-function handleVisibilityChange() {
-    if (!document.hidden) {
-        void loadStatus();
-    }
-}
-
-// =========================
 // INITIALIZATION
 // =========================
 
@@ -1163,17 +1194,10 @@ async function initialize() {
     enableConfigEventDelegation();
     enableTLSConfigEditing();
 
-    document.addEventListener(
-        'visibilitychange',
-        handleVisibilityChange
-    );
-
     await Promise.allSettled([
         loadConfig(),
-        loadStatus()
+        refreshStatus()
     ]);
-
-    startStatusPolling();
 }
 
 void initialize();
