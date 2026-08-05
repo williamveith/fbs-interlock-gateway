@@ -59,8 +59,12 @@ func (s *Server) RunToolServer(ctx context.Context, tool config.Tool) error {
 		Handler:           recoverMiddleware(loggingMiddleware(mux), s.safeOutput),
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       3 * time.Second,
-		WriteTimeout:      3 * time.Second,
-		IdleTimeout:       30 * time.Second,
+		// Shelly operations are bounded by the Shelly client's configured
+		// end-to-end timeout. A fixed three-second WriteTimeout caused Go to
+		// abandon valid FBS responses whenever mTLS took longer than three
+		// seconds, even when defaults.timeout_ms was intentionally higher.
+		WriteTimeout: 0,
+		IdleTimeout:  30 * time.Second,
 	}
 
 	go func() {

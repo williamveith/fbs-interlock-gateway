@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -675,5 +676,108 @@ func TestHandleRestartRejectsUnsupportedMethod(t *testing.T) {
 		)
 	default:
 		// Expected.
+	}
+}
+
+func TestConcurrentStatusRequestsShareOneRefresh(t *testing.T) {
+	store := &fakeConfigStore{cfg: config.Config{Tools: []config.Tool{{
+		InterlockName: "TEST",
+		IP:            "192.0.2.10",
+		Port:          8081,
+		SwitchID:      0,
+		Enabled:       true,
+	}}}}
+
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := New(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{getStatus: func(ctx context.Context, tool config.Tool) (shelly.SwitchStatus, error) {
+			calls.Add(1)
+			started <- struct{}{}
+			select {
+			case <-release:
+				return shelly.SwitchStatus{Output: true}, nil
+			case <-ctx.Done():
+				return shelly.SwitchStatus{}, ctx.Err()
+			}
+		}},
+		nil,
+	)
+
+	first := httptest.NewRecorder()
+	second := httptest.NewRecorder()
+	done := make(chan struct{}, 2)
+
+	go func() {
+		server.handleStatus(first, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first status refresh did not start")
+	}
+
+	go func() {
+		server.handleStatus(second, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+		done <- struct{}{}
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("GetStatus calls while refresh in flight = %d, want 1", got)
+	}
+
+	close(release)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("status request did not finish")
+		}
+	}
+
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("response codes = %d and %d, want 200 and 200", first.Code, second.Code)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("GetStatus calls = %d, want 1", got)
+	}
+}
+
+func TestStatusSnapshotUsesShortCache(t *testing.T) {
+	store := &fakeConfigStore{cfg: config.Config{Tools: []config.Tool{{
+		InterlockName: "TEST",
+		IP:            "192.0.2.10",
+		Port:          8081,
+		SwitchID:      0,
+		Enabled:       true,
+	}}}}
+
+	var calls atomic.Int32
+	server := New(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{getStatus: func(context.Context, config.Tool) (shelly.SwitchStatus, error) {
+			calls.Add(1)
+			return shelly.SwitchStatus{Output: true}, nil
+		}},
+		nil,
+	)
+
+	for i := 0; i < 2; i++ {
+		response := httptest.NewRecorder()
+		server.handleStatus(response, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("response code = %d, want 200", response.Code)
+		}
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("GetStatus calls = %d, want 1", got)
 	}
 }

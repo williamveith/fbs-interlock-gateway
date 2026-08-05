@@ -25,7 +25,8 @@ const (
 	maxConfigRequestBytes = 1 << 20 // 1 MiB
 	maxHeaderBytes        = 32 << 10
 
-	maxConcurrentStatusRequests = 16
+	maxConcurrentStatusRequests = 4
+	statusCacheTTL              = 2 * time.Second
 
 	readHeaderTimeout = 2 * time.Second
 	readTimeout       = 10 * time.Second
@@ -53,6 +54,12 @@ type Server struct {
 	store            ConfigStore
 	statusClient     StatusClient
 	restartRequested chan<- struct{}
+
+	statusMu          sync.Mutex
+	statusCache       []ToolStatus
+	statusCacheAt     time.Time
+	statusRefreshDone chan struct{}
+	statusRefreshErr  error
 }
 
 type ToolStatus struct {
@@ -449,11 +456,79 @@ func (s *Server) handleStatus(
 		return
 	}
 
+	results, err := s.statusSnapshot(r.Context())
+	if err != nil {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
+// statusSnapshot prevents overlapping Admin UI sweeps. A second browser poll
+// reuses a recent snapshot or joins the in-flight refresh instead of starting
+// another fleet-wide burst of Shelly requests.
+func (s *Server) statusSnapshot(ctx context.Context) ([]ToolStatus, error) {
+	s.statusMu.Lock()
+
+	if len(s.statusCache) > 0 && time.Since(s.statusCacheAt) < statusCacheTTL {
+		cached := cloneToolStatuses(s.statusCache)
+		s.statusMu.Unlock()
+		return cached, nil
+	}
+
+	if refreshDone := s.statusRefreshDone; refreshDone != nil {
+		// If a previous snapshot exists, return it immediately while the single
+		// refresh proceeds. The Admin UI is informational; it must not queue
+		// another device sweep behind the first one.
+		if len(s.statusCache) > 0 {
+			cached := cloneToolStatuses(s.statusCache)
+			s.statusMu.Unlock()
+			return cached, nil
+		}
+
+		s.statusMu.Unlock()
+		select {
+		case <-refreshDone:
+			s.statusMu.Lock()
+			cached := cloneToolStatuses(s.statusCache)
+			refreshErr := s.statusRefreshErr
+			s.statusMu.Unlock()
+			if refreshErr != nil {
+				return nil, refreshErr
+			}
+			return cached, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	refreshDone := make(chan struct{})
+	s.statusRefreshDone = refreshDone
+	s.statusRefreshErr = nil
+	s.statusMu.Unlock()
+
+	results, err := s.collectStatuses(ctx)
+
+	s.statusMu.Lock()
+	if err == nil {
+		s.statusCache = cloneToolStatuses(results)
+		s.statusCacheAt = time.Now()
+	}
+	s.statusRefreshErr = err
+	if s.statusRefreshDone == refreshDone {
+		s.statusRefreshDone = nil
+		close(refreshDone)
+	}
+	s.statusMu.Unlock()
+
+	return results, err
+}
+
+func (s *Server) collectStatuses(ctx context.Context) ([]ToolStatus, error) {
 	cfg := s.store.ConfigSnapshot()
 	safeOutput := s.store.SafeOutput()
 
 	results := make([]ToolStatus, len(cfg.Tools))
-
 	enabledCount := 0
 
 	for i, tool := range cfg.Tools {
@@ -472,14 +547,10 @@ func (s *Server) handleStatus(
 	}
 
 	if enabledCount == 0 {
-		writeJSON(w, http.StatusOK, results)
-		return
+		return results, nil
 	}
 
-	workerCount := min(
-		enabledCount,
-		maxConcurrentStatusRequests,
-	)
+	workerCount := min(enabledCount, maxConcurrentStatusRequests)
 
 	type statusJob struct {
 		index int
@@ -487,7 +558,6 @@ func (s *Server) handleStatus(
 	}
 
 	jobs := make(chan statusJob)
-
 	var workers sync.WaitGroup
 	workers.Add(workerCount)
 
@@ -496,15 +566,11 @@ func (s *Server) handleStatus(
 			defer workers.Done()
 
 			for job := range jobs {
-				if r.Context().Err() != nil {
+				if ctx.Err() != nil {
 					return
 				}
 
-				status, err := s.statusClient.GetStatus(
-					r.Context(),
-					job.tool,
-				)
-
+				status, err := s.statusClient.GetStatus(ctx, job.tool)
 				if err != nil {
 					results[job.index].Connected = false
 					results[job.index].Output = safeOutput
@@ -525,12 +591,8 @@ sendJobs:
 		}
 
 		select {
-		case jobs <- statusJob{
-			index: i,
-			tool:  tool,
-		}:
-
-		case <-r.Context().Done():
+		case jobs <- statusJob{index: i, tool: tool}:
+		case <-ctx.Done():
 			break sendJobs
 		}
 	}
@@ -538,11 +600,15 @@ sendJobs:
 	close(jobs)
 	workers.Wait()
 
-	if err := r.Context().Err(); err != nil {
-		return
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	return results, nil
+}
+
+func cloneToolStatuses(statuses []ToolStatus) []ToolStatus {
+	return append([]ToolStatus(nil), statuses...)
 }
 
 func (s *Server) handleRestart(

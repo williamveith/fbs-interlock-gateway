@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -969,5 +970,125 @@ func writeTestFile(
 
 	if err := os.WriteFile(path, data, mode); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type timeoutTestError struct{}
+
+func (timeoutTestError) Error() string   { return "temporary timeout" }
+func (timeoutTestError) Timeout() bool   { return true }
+func (timeoutTestError) Temporary() bool { return true }
+
+func TestGetStatusRetriesTransientTransportFailure(t *testing.T) {
+	client := NewClient(time.Second)
+	client.statusRetryDelay = 0
+
+	var attempts atomic.Int32
+	client.http.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return nil, timeoutTestError{}
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":0,"output":true}`)),
+			Request:    req,
+		}, nil
+	})
+
+	status, err := client.GetStatus(context.Background(), config.Tool{
+		InterlockName: "retry-test",
+		IP:            "shelly.example.test",
+		SwitchID:      0,
+	})
+	if err != nil {
+		t.Fatalf("GetStatus() error = %v", err)
+	}
+	if !status.Output {
+		t.Fatal("status output = false, want true")
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
+	}
+}
+
+func TestUnauthenticatedRequestsAreSerializedPerDevice(t *testing.T) {
+	var active atomic.Int32
+	var maximum atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+
+		time.Sleep(25 * time.Millisecond)
+		fmt.Fprint(w, `{"id":0,"output":false}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	tool := toolForServer(server)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.GetStatus(context.Background(), tool)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := maximum.Load(); got != 1 {
+		t.Fatalf("maximum concurrent device requests = %d, want 1", got)
+	}
+}
+
+func TestTLSClientSessionCacheIsEnabled(t *testing.T) {
+	pki := createMutualTLSTestPKI(t)
+	client, err := NewClientWithTLS(
+		time.Second,
+		config.ShellyTLSConfig{
+			ServerCAFile:   pki.serverCAFile,
+			ClientCertFile: pki.clientCertFile,
+			ClientKeyFile:  pki.clientKeyFile,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := client.http.Transport.(*http.Transport)
+	if transport.TLSClientConfig.ClientSessionCache == nil {
+		t.Fatal("ClientSessionCache is nil")
+	}
+	if transport.ResponseHeaderTimeout <= 0 {
+		t.Fatal("ResponseHeaderTimeout must be configured")
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("http.Client.Timeout = %s, want 0; operation context owns the deadline", client.http.Timeout)
 	}
 }

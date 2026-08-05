@@ -11,11 +11,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
@@ -27,13 +29,22 @@ const (
 	authenticationThrottleDelay = 2 * time.Second
 	maxAuthenticationAttempts   = 6
 
+	maxStatusAttempts = 2
+	statusRetryDelay  = 150 * time.Millisecond
+
+	maxDialTimeout           = 3 * time.Second
+	maxTLSHandshakeTimeout   = 5 * time.Second
+	maxResponseHeaderTimeout = 5 * time.Second
+
 	rebootDelay           = 500 * time.Millisecond
 	rebootRequestTimeout  = 6 * time.Second
 	defaultRebootCooldown = 5 * time.Minute
 )
 
 type Client struct {
-	http *http.Client
+	http             *http.Client
+	requestTimeout   time.Duration
+	statusRetryDelay time.Duration
 
 	authMu                      sync.Mutex
 	authByIP                    map[string]*deviceAuthState
@@ -45,7 +56,7 @@ type Client struct {
 }
 
 type deviceAuthState struct {
-	mu      sync.Mutex
+	gate    chan struct{}
 	session *digestSession
 }
 
@@ -88,17 +99,23 @@ func newClient(
 	timeout time.Duration,
 	tlsConfig config.ShellyTLSConfig,
 ) (*Client, error) {
+	if timeout <= 0 {
+		return nil, errors.New("Shelly request timeout must be greater than zero")
+	}
+
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   timeout,
+			Timeout:   phaseTimeout(timeout, maxDialTimeout),
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   2,
+		MaxConnsPerHost:       2,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   timeout,
+		TLSHandshakeTimeout:   phaseTimeout(timeout, maxTLSHandshakeTimeout),
+		ResponseHeaderTimeout: phaseTimeout(timeout, maxResponseHeaderTimeout),
 		ExpectContinueTimeout: time.Second,
 	}
 
@@ -113,9 +130,13 @@ func newClient(
 
 	return &Client{
 		http: &http.Client{
-			Timeout:   timeout,
+			// The operation context below is the single end-to-end timeout. Keeping
+			// Client.Timeout disabled prevents a second, competing deadline that
+			// obscures whether DNS, TCP, TLS, or response headers stalled.
 			Transport: transport,
 		},
+		requestTimeout:              timeout,
+		statusRetryDelay:            statusRetryDelay,
 		authByIP:                    make(map[string]*deviceAuthState),
 		authenticationThrottleDelay: authenticationThrottleDelay,
 		recoveryByIP:                make(map[string]recoveryState),
@@ -124,6 +145,9 @@ func newClient(
 }
 
 func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus, error) {
+	ctx, cancel := c.withRequestTimeout(ctx)
+	defer cancel()
+
 	var status SwitchStatus
 
 	requestURL, err := rpcURL(
@@ -137,7 +161,7 @@ func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus,
 		return status, err
 	}
 
-	resp, err := c.doGET(ctx, tool, requestURL)
+	resp, err := c.doStatusGET(ctx, tool, requestURL)
 	if err != nil {
 		return status, err
 	}
@@ -157,6 +181,9 @@ func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus,
 }
 
 func (c *Client) Set(ctx context.Context, tool config.Tool, on bool) error {
+	ctx, cancel := c.withRequestTimeout(ctx)
+	defer cancel()
+
 	requestURL, err := rpcURL(
 		tool,
 		"Switch.Set",
@@ -188,6 +215,9 @@ func (c *Client) Set(ctx context.Context, tool config.Tool, on bool) error {
 // Reboot requests a Shelly device restart. It intentionally does not invoke
 // automatic recovery if the reboot request itself fails, preventing recursion.
 func (c *Client) Reboot(ctx context.Context, tool config.Tool) error {
+	ctx, cancel := c.withRequestTimeout(ctx)
+	defer cancel()
+
 	requestURL, err := rpcURL(
 		tool,
 		"Shelly.Reboot",
@@ -327,6 +357,15 @@ func (c *Client) doGET(
 	tool config.Tool,
 	requestURL string,
 ) (*http.Response, error) {
+	state := c.authState(deviceKey(tool))
+	if err := state.acquire(ctx); err != nil {
+		return nil, fmt.Errorf("wait for Shelly request slot: %w", err)
+	}
+	defer state.release()
+
+	// Shelly devices expose a small HTTP/RPC server. Serialize every request to
+	// a device—not only Digest-authenticated requests—so Admin polling, FBS
+	// commands, retries, and recovery requests cannot overload it concurrently.
 	if tool.Password == nil || strings.TrimSpace(*tool.Password) == "" {
 		return c.doUnauthenticatedGET(ctx, requestURL)
 	}
@@ -335,15 +374,6 @@ func (c *Client) doGET(
 	if tool.Username != nil && strings.TrimSpace(*tool.Username) != "" {
 		username = strings.TrimSpace(*tool.Username)
 	}
-
-	deviceKey := strings.TrimSpace(tool.IP)
-	state := c.authState(deviceKey)
-
-	// Shelly requires nc to be strictly increasing for a reused nonce. Holding
-	// this lock across the request prevents concurrent calls to the same device
-	// from arriving out of nonce-count order.
-	state.mu.Lock()
-	defer state.mu.Unlock()
 
 	return c.doAuthenticatedGETLocked(
 		ctx,
@@ -476,7 +506,7 @@ func (c *Client) authState(deviceKey string) *deviceAuthState {
 
 	state := c.authByIP[deviceKey]
 	if state == nil {
-		state = &deviceAuthState{}
+		state = newDeviceAuthState()
 		c.authByIP[deviceKey] = state
 	}
 
@@ -497,7 +527,212 @@ func (c *Client) sendGET(
 		req.Header.Set("Authorization", authorization)
 	}
 
-	return c.http.Do(req)
+	timing := newRequestTiming()
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), timing.trace()))
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, timing.wrapError(req.URL.Host, err)
+	}
+
+	return resp, nil
+}
+
+func (c *Client) doStatusGET(
+	ctx context.Context,
+	tool config.Tool,
+	requestURL string,
+) (*http.Response, error) {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxStatusAttempts; attempt++ {
+		resp, err := c.doGET(ctx, tool, requestURL)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+		if attempt == maxStatusAttempts || !shouldRetryStatus(ctx, err) {
+			return nil, err
+		}
+
+		log.Printf(
+			"tool=%s shelly_status_retry host=%s attempt=%d error=%v",
+			tool.InterlockName,
+			tool.IP,
+			attempt+1,
+			err,
+		)
+
+		if err := waitForContext(ctx, c.statusRetryDelay); err != nil {
+			return nil, fmt.Errorf("wait before Shelly status retry: %w", err)
+		}
+	}
+
+	return nil, lastErr
+}
+
+func shouldRetryStatus(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+
+	var certificateError *tls.CertificateVerificationError
+	if errors.As(err, &certificateError) {
+		return false
+	}
+
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return false
+	}
+
+	var hostnameError x509.HostnameError
+	if errors.As(err, &hostnameError) {
+		return false
+	}
+
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return networkError.Timeout() || networkError.Temporary()
+	}
+
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE)
+}
+
+func (c *Client) withRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, c.requestTimeout)
+}
+
+func phaseTimeout(total time.Duration, maximum time.Duration) time.Duration {
+	if total < maximum {
+		return total
+	}
+	return maximum
+}
+
+func deviceKey(tool config.Tool) string {
+	return config.ToolProtocol(tool) + "://" + strings.TrimSpace(tool.IP)
+}
+
+func newDeviceAuthState() *deviceAuthState {
+	state := &deviceAuthState{gate: make(chan struct{}, 1)}
+	state.gate <- struct{}{}
+	return state
+}
+
+func (s *deviceAuthState) acquire(ctx context.Context) error {
+	select {
+	case <-s.gate:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *deviceAuthState) release() {
+	s.gate <- struct{}{}
+}
+
+type requestTiming struct {
+	mu               sync.Mutex
+	started          time.Time
+	dnsStarted       time.Time
+	dnsDone          time.Time
+	connectStarted   time.Time
+	connectDone      time.Time
+	tlsStarted       time.Time
+	tlsDone          time.Time
+	gotConn          time.Time
+	firstByte        time.Time
+	connectionReused bool
+	tlsResumed       bool
+}
+
+func newRequestTiming() *requestTiming {
+	return &requestTiming{started: time.Now()}
+}
+
+func (t *requestTiming) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		DNSStart: func(httptrace.DNSStartInfo) {
+			t.mu.Lock()
+			t.dnsStarted = time.Now()
+			t.mu.Unlock()
+		},
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			t.mu.Lock()
+			t.dnsDone = time.Now()
+			t.mu.Unlock()
+		},
+		ConnectStart: func(_, _ string) {
+			t.mu.Lock()
+			if t.connectStarted.IsZero() {
+				t.connectStarted = time.Now()
+			}
+			t.mu.Unlock()
+		},
+		ConnectDone: func(_, _ string, _ error) {
+			t.mu.Lock()
+			t.connectDone = time.Now()
+			t.mu.Unlock()
+		},
+		TLSHandshakeStart: func() {
+			t.mu.Lock()
+			t.tlsStarted = time.Now()
+			t.mu.Unlock()
+		},
+		TLSHandshakeDone: func(state tls.ConnectionState, _ error) {
+			t.mu.Lock()
+			t.tlsDone = time.Now()
+			t.tlsResumed = state.DidResume
+			t.mu.Unlock()
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			t.mu.Lock()
+			t.gotConn = time.Now()
+			t.connectionReused = info.Reused
+			t.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			t.mu.Lock()
+			t.firstByte = time.Now()
+			t.mu.Unlock()
+		},
+	}
+}
+
+func (t *requestTiming) wrapError(host string, err error) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	phase := "request"
+	switch {
+	case !t.tlsStarted.IsZero() && t.tlsDone.IsZero():
+		phase = "tls_handshake"
+	case !t.connectStarted.IsZero() && t.connectDone.IsZero():
+		phase = "tcp_connect"
+	case !t.dnsStarted.IsZero() && t.dnsDone.IsZero():
+		phase = "dns_lookup"
+	case !t.gotConn.IsZero() && t.firstByte.IsZero():
+		phase = "response_headers"
+	case !t.firstByte.IsZero():
+		phase = "response_body"
+	}
+
+	return fmt.Errorf(
+		"Shelly request host=%s phase=%s elapsed=%s connection_reused=%t tls_resumed=%t: %w",
+		host,
+		phase,
+		time.Since(t.started).Round(time.Millisecond),
+		t.connectionReused,
+		t.tlsResumed,
+		err,
+	)
 }
 
 func requestURI(rawURL string) (string, error) {
@@ -572,9 +807,10 @@ func loadTLSConfig(cfg config.ShellyTLSConfig) (*tls.Config, error) {
 	}
 
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		RootCAs:      roots,
-		Certificates: []tls.Certificate{clientCertificate},
+		MinVersion:         tls.VersionTLS12,
+		RootCAs:            roots,
+		Certificates:       []tls.Certificate{clientCertificate},
+		ClientSessionCache: tls.NewLRUClientSessionCache(256),
 	}, nil
 }
 
