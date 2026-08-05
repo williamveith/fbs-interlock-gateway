@@ -20,10 +20,17 @@ type ShellyClient interface {
 	Set(ctx context.Context, tool config.Tool, on bool) error
 }
 
+type StatusRecorder interface {
+	NextRevision() uint64
+	RecordSuccess(tool config.Tool, output bool, revision uint64)
+	RecordFailure(tool config.Tool, safeOutput bool, err error, revision uint64)
+}
+
 type Server struct {
-	bind       string
-	safeOutput bool
-	shelly     ShellyClient
+	bind           string
+	safeOutput     bool
+	shelly         ShellyClient
+	statusRecorder StatusRecorder
 }
 
 type responseRecorder struct {
@@ -37,11 +44,17 @@ var (
 	fbsOff = []byte(`{"Success":1,"State":0}`)
 )
 
-func NewServer(bind string, safeOutput bool, shellyClient ShellyClient) *Server {
+func NewServer(
+	bind string,
+	safeOutput bool,
+	shellyClient ShellyClient,
+	statusRecorder StatusRecorder,
+) *Server {
 	return &Server{
-		bind:       bind,
-		safeOutput: safeOutput,
-		shelly:     shellyClient,
+		bind:           bind,
+		safeOutput:     safeOutput,
+		shelly:         shellyClient,
+		statusRecorder: statusRecorder,
 	}
 }
 
@@ -131,10 +144,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, tool confi
 	status, err := s.shelly.GetStatus(r.Context(), tool)
 	if err != nil {
 		log.Printf("tool=%s shelly_status_error=%v", tool.InterlockName, err)
+		s.recordFailure(tool, err)
 		writeFBS(w, s.safeOutput)
 		return
 	}
 
+	s.recordSuccess(tool, status.Output)
 	writeFBS(w, status.Output)
 }
 
@@ -142,11 +157,36 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request, tool config.T
 	err := s.shelly.Set(r.Context(), tool, on)
 	if err != nil {
 		log.Printf("tool=%s shelly_set_error command=%s error=%v", tool.InterlockName, onOff(on), err)
+		s.recordFailure(tool, err)
 		writeFBS(w, s.safeOutput)
 		return
 	}
 
+	s.recordSuccess(tool, on)
 	writeFBS(w, on)
+}
+
+func (s *Server) recordSuccess(tool config.Tool, output bool) {
+	if s.statusRecorder == nil {
+		return
+	}
+
+	revision := s.statusRecorder.NextRevision()
+	s.statusRecorder.RecordSuccess(tool, output, revision)
+}
+
+func (s *Server) recordFailure(tool config.Tool, err error) {
+	if s.statusRecorder == nil {
+		return
+	}
+
+	revision := s.statusRecorder.NextRevision()
+	s.statusRecorder.RecordFailure(
+		tool,
+		s.safeOutput,
+		err,
+		revision,
+	)
 }
 
 func writeFBS(w http.ResponseWriter, state bool) {

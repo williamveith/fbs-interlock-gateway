@@ -12,16 +12,18 @@ import (
 	"github.com/williamveith/fbs-interlock-gateway/internal/fbs"
 	"github.com/williamveith/fbs-interlock-gateway/internal/process"
 	"github.com/williamveith/fbs-interlock-gateway/internal/shelly"
+	"github.com/williamveith/fbs-interlock-gateway/internal/status"
 )
 
 type Gateway struct {
-	mu         sync.RWMutex
-	cfg        config.Config
-	configPath string
-	adminAddr  string
-	safeOutput bool
-	shelly     *shelly.Client
-	initErr    error
+	mu          sync.RWMutex
+	cfg         config.Config
+	configPath  string
+	adminAddr   string
+	safeOutput  bool
+	shelly      *shelly.Client
+	statusStore *status.Store
+	initErr     error
 }
 
 func New(cfg config.Config, configPath string, adminAddr string) *Gateway {
@@ -33,12 +35,13 @@ func New(cfg config.Config, configPath string, adminAddr string) *Gateway {
 	)
 
 	return &Gateway{
-		cfg:        cfg,
-		configPath: configPath,
-		adminAddr:  adminAddr,
-		safeOutput: config.SafeOutput(cfg),
-		shelly:     shellyClient,
-		initErr:    err,
+		cfg:         cfg,
+		configPath:  configPath,
+		adminAddr:   adminAddr,
+		safeOutput:  config.SafeOutput(cfg),
+		shelly:      shellyClient,
+		statusStore: status.New(cfg, config.SafeOutput(cfg)),
+		initErr:     err,
 	}
 }
 
@@ -65,7 +68,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 
 	if adminAddr != "" {
-		adminServer := admin.New(adminAddr, g, g.shelly, restartRequested)
+		adminServer := admin.New(adminAddr, g, g.shelly, g.statusStore, restartRequested)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -77,7 +80,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 		log.Printf("admin UI disabled")
 	}
 
-	fbsServer := fbs.NewServer(cfg.Bind, g.SafeOutput(), g.shelly)
+	fbsServer := fbs.NewServer(cfg.Bind, g.SafeOutput(), g.shelly, g.statusStore)
 	enabledCount := 0
 
 	for _, tool := range cfg.Tools {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
 	"github.com/williamveith/fbs-interlock-gateway/internal/shelly"
+	statusstore "github.com/williamveith/fbs-interlock-gateway/internal/status"
 )
 
 type fakeShellyClient struct {
@@ -17,11 +18,18 @@ type fakeShellyClient struct {
 	setCalls  []bool
 }
 
-func (f *fakeShellyClient) GetStatus(context.Context, config.Tool) (shelly.SwitchStatus, error) {
+func (f *fakeShellyClient) GetStatus(
+	context.Context,
+	config.Tool,
+) (shelly.SwitchStatus, error) {
 	return f.status, f.statusErr
 }
 
-func (f *fakeShellyClient) Set(_ context.Context, _ config.Tool, on bool) error {
+func (f *fakeShellyClient) Set(
+	_ context.Context,
+	_ config.Tool,
+	on bool,
+) error {
 	f.setCalls = append(f.setCalls, on)
 	return f.setErr
 }
@@ -36,11 +44,38 @@ func testTool() config.Tool {
 	}
 }
 
-func TestStatusReturnsShellyOutput(t *testing.T) {
-	client := &fakeShellyClient{status: shelly.SwitchStatus{ID: 0, Output: true}}
-	server := NewServer("127.0.0.1", false, client)
+func newTestServer(
+	safeOutput bool,
+	client ShellyClient,
+) (*Server, *statusstore.Store) {
+	tool := testTool()
+	sharedStatus := statusstore.New(
+		config.Config{Tools: []config.Tool{tool}},
+		safeOutput,
+	)
 
-	req := httptest.NewRequest("GET", "http://gateway/status", nil)
+	return NewServer(
+		"127.0.0.1",
+		safeOutput,
+		client,
+		sharedStatus,
+	), sharedStatus
+}
+
+func TestStatusReturnsShellyOutputAndUpdatesSharedStatus(t *testing.T) {
+	client := &fakeShellyClient{
+		status: shelly.SwitchStatus{
+			ID:     0,
+			Output: true,
+		},
+	}
+	server, sharedStatus := newTestServer(false, client)
+
+	req := httptest.NewRequest(
+		"GET",
+		"http://gateway/status",
+		nil,
+	)
 	res := httptest.NewRecorder()
 	server.handleFBSRequest(res, req, testTool())
 
@@ -50,9 +85,14 @@ func TestStatusReturnsShellyOutput(t *testing.T) {
 	if got := res.Body.String(); got != `{"Success":1,"State":1}` {
 		t.Fatalf("body = %q", got)
 	}
+
+	row := sharedStatus.Snapshot()[0]
+	if !row.Connected || !row.Output || row.Error != "" {
+		t.Fatalf("shared status = %#v", row)
+	}
 }
 
-func TestOnAndOffCommands(t *testing.T) {
+func TestOnAndOffCommandsUpdateSharedStatus(t *testing.T) {
 	tests := []struct {
 		path string
 		want bool
@@ -67,40 +107,99 @@ func TestOnAndOffCommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			client := &fakeShellyClient{}
-			server := NewServer("127.0.0.1", false, client)
+			server, sharedStatus := newTestServer(false, client)
 
-			req := httptest.NewRequest("GET", "http://gateway"+tt.path, nil)
+			req := httptest.NewRequest(
+				"GET",
+				"http://gateway"+tt.path,
+				nil,
+			)
 			res := httptest.NewRecorder()
 			server.handleFBSRequest(res, req, testTool())
 
 			if len(client.setCalls) != 1 || client.setCalls[0] != tt.want {
-				t.Fatalf("set calls = %v, want [%t]", client.setCalls, tt.want)
+				t.Fatalf(
+					"set calls = %v, want [%t]",
+					client.setCalls,
+					tt.want,
+				)
 			}
 			if got := res.Body.String(); got != tt.body {
 				t.Fatalf("body = %q, want %q", got, tt.body)
+			}
+
+			row := sharedStatus.Snapshot()[0]
+			if !row.Connected || row.Output != tt.want || row.Error != "" {
+				t.Fatalf("shared status = %#v", row)
 			}
 		})
 	}
 }
 
-func TestShellyFailureReturnsConfiguredSafeState(t *testing.T) {
-	client := &fakeShellyClient{statusErr: errors.New("offline")}
-	server := NewServer("127.0.0.1", true, client)
+func TestShellyStatusFailureReturnsAndRecordsConfiguredSafeState(
+	t *testing.T,
+) {
+	client := &fakeShellyClient{
+		statusErr: errors.New("offline"),
+	}
+	server, sharedStatus := newTestServer(true, client)
 
-	req := httptest.NewRequest("GET", "http://gateway/status", nil)
+	req := httptest.NewRequest(
+		"GET",
+		"http://gateway/status",
+		nil,
+	)
 	res := httptest.NewRecorder()
 	server.handleFBSRequest(res, req, testTool())
 
 	if got := res.Body.String(); got != `{"Success":1,"State":1}` {
 		t.Fatalf("body = %q, want safe-on response", got)
 	}
+
+	row := sharedStatus.Snapshot()[0]
+	if row.Connected || !row.Output || row.Error != "offline" {
+		t.Fatalf("shared failure status = %#v", row)
+	}
 }
 
-func TestUnknownRequestReturnsSafeStateWithoutChangingRelay(t *testing.T) {
-	client := &fakeShellyClient{}
-	server := NewServer("127.0.0.1", false, client)
+func TestShellySetFailureReturnsAndRecordsConfiguredSafeState(
+	t *testing.T,
+) {
+	client := &fakeShellyClient{
+		setErr: errors.New("set failed"),
+	}
+	server, sharedStatus := newTestServer(false, client)
 
-	req := httptest.NewRequest("GET", "http://gateway/not-a-command", nil)
+	req := httptest.NewRequest(
+		"GET",
+		"http://gateway/on",
+		nil,
+	)
+	res := httptest.NewRecorder()
+	server.handleFBSRequest(res, req, testTool())
+
+	if got := res.Body.String(); got != `{"Success":1,"State":0}` {
+		t.Fatalf("body = %q, want safe-off response", got)
+	}
+
+	row := sharedStatus.Snapshot()[0]
+	if row.Connected || row.Output || row.Error != "set failed" {
+		t.Fatalf("shared failure status = %#v", row)
+	}
+}
+
+func TestUnknownRequestReturnsSafeStateWithoutChangingRelayOrStatus(
+	t *testing.T,
+) {
+	client := &fakeShellyClient{}
+	server, sharedStatus := newTestServer(false, client)
+	before := sharedStatus.Snapshot()
+
+	req := httptest.NewRequest(
+		"GET",
+		"http://gateway/not-a-command",
+		nil,
+	)
 	res := httptest.NewRecorder()
 	server.handleFBSRequest(res, req, testTool())
 
@@ -109,5 +208,14 @@ func TestUnknownRequestReturnsSafeStateWithoutChangingRelay(t *testing.T) {
 	}
 	if got := res.Body.String(); got != `{"Success":1,"State":0}` {
 		t.Fatalf("body = %q, want safe-off response", got)
+	}
+
+	after := sharedStatus.Snapshot()
+	if len(after) != len(before) || after[0] != before[0] {
+		t.Fatalf(
+			"unknown request changed shared status: before=%#v after=%#v",
+			before,
+			after,
+		)
 	}
 }
