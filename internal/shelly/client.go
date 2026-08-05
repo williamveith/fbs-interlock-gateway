@@ -32,9 +32,8 @@ const (
 	maxStatusAttempts = 2
 	statusRetryDelay  = 150 * time.Millisecond
 
-	maxDialTimeout           = 3 * time.Second
-	maxTLSHandshakeTimeout   = 5 * time.Second
-	maxResponseHeaderTimeout = 5 * time.Second
+	maxDialTimeout         = 3 * time.Second
+	maxTLSHandshakeTimeout = 5 * time.Second
 
 	rebootDelay           = 500 * time.Millisecond
 	rebootRequestTimeout  = 6 * time.Second
@@ -58,6 +57,17 @@ type Client struct {
 type deviceAuthState struct {
 	gate    chan struct{}
 	session *digestSession
+}
+
+type releaseOnCloseBody struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+func (b *releaseOnCloseBody) Close() error {
+	defer b.once.Do(b.release)
+	return b.ReadCloser.Close()
 }
 
 type recoveryState struct {
@@ -115,7 +125,7 @@ func newClient(
 		MaxConnsPerHost:       2,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   phaseTimeout(timeout, maxTLSHandshakeTimeout),
-		ResponseHeaderTimeout: phaseTimeout(timeout, maxResponseHeaderTimeout),
+		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: time.Second,
 	}
 
@@ -144,12 +154,10 @@ func newClient(
 	}, nil
 }
 
-func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus, error) {
-	ctx, cancel := c.withRequestTimeout(ctx)
-	defer cancel()
-
-	var status SwitchStatus
-
+func (c *Client) GetStatus(
+	ctx context.Context,
+	tool config.Tool,
+) (SwitchStatus, error) {
 	requestURL, err := rpcURL(
 		tool,
 		"Switch.GetStatus",
@@ -158,10 +166,68 @@ func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus,
 		},
 	)
 	if err != nil {
-		return status, err
+		return SwitchStatus{}, err
 	}
 
-	resp, err := c.doStatusGET(ctx, tool, requestURL)
+	var lastErr error
+
+	for attempt := 1; attempt <= maxStatusAttempts; attempt++ {
+		// Each attempt receives the configured Shelly timeout. The caller's
+		// context can still impose a shorter overall deadline.
+		attemptCtx, cancel := context.WithTimeout(
+			ctx,
+			c.requestTimeout,
+		)
+
+		status, err := c.getStatusOnce(
+			attemptCtx,
+			tool,
+			requestURL,
+		)
+
+		cancel()
+
+		if err == nil {
+			return status, nil
+		}
+
+		lastErr = err
+
+		if attempt == maxStatusAttempts ||
+			!shouldRetryStatus(ctx, err) {
+			return SwitchStatus{}, err
+		}
+
+		log.Printf(
+			"tool=%s shelly_status_retry host=%s attempt=%d error=%v",
+			tool.InterlockName,
+			tool.IP,
+			attempt+1,
+			err,
+		)
+
+		if err := waitForContext(
+			ctx,
+			c.statusRetryDelay,
+		); err != nil {
+			return SwitchStatus{}, fmt.Errorf(
+				"wait before Shelly status retry: %w",
+				err,
+			)
+		}
+	}
+
+	return SwitchStatus{}, lastErr
+}
+
+func (c *Client) getStatusOnce(
+	ctx context.Context,
+	tool config.Tool,
+	requestURL string,
+) (SwitchStatus, error) {
+	var status SwitchStatus
+
+	resp, err := c.doGET(ctx, tool, requestURL)
 	if err != nil {
 		return status, err
 	}
@@ -173,8 +239,13 @@ func (c *Client) GetStatus(ctx context.Context, tool config.Tool) (SwitchStatus,
 		return status, err
 	}
 
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&status); err != nil {
-		return status, fmt.Errorf("decode shelly status response: %w", err)
+	if err := json.NewDecoder(
+		io.LimitReader(resp.Body, maxResponseBodyBytes),
+	).Decode(&status); err != nil {
+		return status, fmt.Errorf(
+			"decode Shelly status response: %w",
+			err,
+		)
 	}
 
 	return status, nil
@@ -358,30 +429,67 @@ func (c *Client) doGET(
 	requestURL string,
 ) (*http.Response, error) {
 	state := c.authState(deviceKey(tool))
+
 	if err := state.acquire(ctx); err != nil {
-		return nil, fmt.Errorf("wait for Shelly request slot: %w", err)
-	}
-	defer state.release()
-
-	// Shelly devices expose a small HTTP/RPC server. Serialize every request to
-	// a device—not only Digest-authenticated requests—so Admin polling, FBS
-	// commands, retries, and recovery requests cannot overload it concurrently.
-	if tool.Password == nil || strings.TrimSpace(*tool.Password) == "" {
-		return c.doUnauthenticatedGET(ctx, requestURL)
+		return nil, fmt.Errorf(
+			"wait for Shelly request slot: %w",
+			err,
+		)
 	}
 
-	username := "admin"
-	if tool.Username != nil && strings.TrimSpace(*tool.Username) != "" {
-		username = strings.TrimSpace(*tool.Username)
-	}
-
-	return c.doAuthenticatedGETLocked(
-		ctx,
-		state,
-		requestURL,
-		username,
-		*tool.Password,
+	var (
+		resp *http.Response
+		err  error
 	)
+
+	if tool.Password == nil ||
+		strings.TrimSpace(*tool.Password) == "" {
+		resp, err = c.doUnauthenticatedGET(
+			ctx,
+			requestURL,
+		)
+	} else {
+		username := "admin"
+
+		if tool.Username != nil &&
+			strings.TrimSpace(*tool.Username) != "" {
+			username = strings.TrimSpace(*tool.Username)
+		}
+
+		resp, err = c.doAuthenticatedGETLocked(
+			ctx,
+			state,
+			requestURL,
+			username,
+			*tool.Password,
+		)
+	}
+
+	if err != nil {
+		state.release()
+		return nil, err
+	}
+
+	if resp == nil {
+		state.release()
+		return nil, errors.New(
+			"Shelly HTTP client returned a nil response",
+		)
+	}
+
+	if resp.Body == nil {
+		resp.Body = http.NoBody
+	}
+
+	// Retain the per-device slot until the caller has finished reading and
+	// closing the response. This prevents another RPC from beginning while
+	// the preceding response is still active.
+	resp.Body = &releaseOnCloseBody{
+		ReadCloser: resp.Body,
+		release:    state.release,
+	}
+
+	return resp, nil
 }
 
 func (c *Client) doUnauthenticatedGET(
@@ -538,40 +646,6 @@ func (c *Client) sendGET(
 	return resp, nil
 }
 
-func (c *Client) doStatusGET(
-	ctx context.Context,
-	tool config.Tool,
-	requestURL string,
-) (*http.Response, error) {
-	var lastErr error
-
-	for attempt := 1; attempt <= maxStatusAttempts; attempt++ {
-		resp, err := c.doGET(ctx, tool, requestURL)
-		if err == nil {
-			return resp, nil
-		}
-
-		lastErr = err
-		if attempt == maxStatusAttempts || !shouldRetryStatus(ctx, err) {
-			return nil, err
-		}
-
-		log.Printf(
-			"tool=%s shelly_status_retry host=%s attempt=%d error=%v",
-			tool.InterlockName,
-			tool.IP,
-			attempt+1,
-			err,
-		)
-
-		if err := waitForContext(ctx, c.statusRetryDelay); err != nil {
-			return nil, fmt.Errorf("wait before Shelly status retry: %w", err)
-		}
-	}
-
-	return nil, lastErr
-}
-
 func shouldRetryStatus(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil {
 		return false
@@ -639,14 +713,21 @@ func (s *deviceAuthState) release() {
 }
 
 type requestTiming struct {
-	mu               sync.Mutex
-	started          time.Time
-	dnsStarted       time.Time
-	dnsDone          time.Time
-	connectStarted   time.Time
-	connectDone      time.Time
-	tlsStarted       time.Time
-	tlsDone          time.Time
+	mu      sync.Mutex
+	started time.Time
+
+	dnsStarted time.Time
+	dnsDone    time.Time
+	dnsErr     error
+
+	connectStarted time.Time
+	connectDone    time.Time
+	connectErr     error
+
+	tlsStarted time.Time
+	tlsDone    time.Time
+	tlsErr     error
+
 	gotConn          time.Time
 	firstByte        time.Time
 	connectionReused bool
@@ -664,9 +745,10 @@ func (t *requestTiming) trace() *httptrace.ClientTrace {
 			t.dnsStarted = time.Now()
 			t.mu.Unlock()
 		},
-		DNSDone: func(httptrace.DNSDoneInfo) {
+		DNSDone: func(info httptrace.DNSDoneInfo) {
 			t.mu.Lock()
 			t.dnsDone = time.Now()
+			t.dnsErr = info.Err
 			t.mu.Unlock()
 		},
 		ConnectStart: func(_, _ string) {
@@ -676,9 +758,14 @@ func (t *requestTiming) trace() *httptrace.ClientTrace {
 			}
 			t.mu.Unlock()
 		},
-		ConnectDone: func(_, _ string, _ error) {
+		ConnectDone: func(_, _ string, err error) {
 			t.mu.Lock()
 			t.connectDone = time.Now()
+
+			if err != nil && t.connectErr == nil {
+				t.connectErr = err
+			}
+
 			t.mu.Unlock()
 		},
 		TLSHandshakeStart: func() {
@@ -686,9 +773,13 @@ func (t *requestTiming) trace() *httptrace.ClientTrace {
 			t.tlsStarted = time.Now()
 			t.mu.Unlock()
 		},
-		TLSHandshakeDone: func(state tls.ConnectionState, _ error) {
+		TLSHandshakeDone: func(
+			state tls.ConnectionState,
+			err error,
+		) {
 			t.mu.Lock()
 			t.tlsDone = time.Now()
+			t.tlsErr = err
 			t.tlsResumed = state.DidResume
 			t.mu.Unlock()
 		},
@@ -711,15 +802,29 @@ func (t *requestTiming) wrapError(host string, err error) error {
 	defer t.mu.Unlock()
 
 	phase := "request"
+
 	switch {
+	case t.gotConn.IsZero() && t.dnsErr != nil:
+		phase = "dns_lookup"
+
+	case t.gotConn.IsZero() && t.connectErr != nil:
+		phase = "tcp_connect"
+
+	case t.gotConn.IsZero() && t.tlsErr != nil:
+		phase = "tls_handshake"
+
 	case !t.tlsStarted.IsZero() && t.tlsDone.IsZero():
 		phase = "tls_handshake"
+
 	case !t.connectStarted.IsZero() && t.connectDone.IsZero():
 		phase = "tcp_connect"
+
 	case !t.dnsStarted.IsZero() && t.dnsDone.IsZero():
 		phase = "dns_lookup"
+
 	case !t.gotConn.IsZero() && t.firstByte.IsZero():
 		phase = "response_headers"
+
 	case !t.firstByte.IsZero():
 		phase = "response_body"
 	}

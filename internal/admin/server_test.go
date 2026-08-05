@@ -405,7 +405,7 @@ func TestHandleConfigRejectsUnsupportedMethod(t *testing.T) {
 	}
 }
 
-func TestHandleStatus(t *testing.T) {
+func TestCollectStatuses(t *testing.T) {
 	store := &fakeConfigStore{
 		safeOutput: true,
 		cfg: config.Config{
@@ -466,29 +466,9 @@ func TestHandleStatus(t *testing.T) {
 		nil,
 	)
 
-	request := httptest.NewRequest(
-		http.MethodGet,
-		"/api/status",
-		nil,
-	)
-
-	response := httptest.NewRecorder()
-
-	server.handleStatus(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf(
-			"expected status %d, got %d: %s",
-			http.StatusOK,
-			response.Code,
-			response.Body.String(),
-		)
-	}
-
-	var results []ToolStatus
-
-	if err := json.NewDecoder(response.Body).Decode(&results); err != nil {
-		t.Fatalf("failed to decode status response: %v", err)
+	results, err := server.collectStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("collectStatuses() error = %v", err)
 	}
 
 	if len(results) != 3 {

@@ -27,6 +27,7 @@ const (
 
 	maxConcurrentStatusRequests = 4
 	statusCacheTTL              = 2 * time.Second
+	statusRefreshTimeout        = 2 * time.Minute
 
 	readHeaderTimeout = 2 * time.Second
 	readTimeout       = 10 * time.Second
@@ -55,11 +56,10 @@ type Server struct {
 	statusClient     StatusClient
 	restartRequested chan<- struct{}
 
-	statusMu          sync.Mutex
-	statusCache       []ToolStatus
-	statusCacheAt     time.Time
-	statusRefreshDone chan struct{}
-	statusRefreshErr  error
+	statusMu              sync.Mutex
+	statusCache           []ToolStatus
+	statusCacheAt         time.Time
+	statusRefreshInFlight bool
 }
 
 type ToolStatus struct {
@@ -456,72 +456,91 @@ func (s *Server) handleStatus(
 		return
 	}
 
-	results, err := s.statusSnapshot(r.Context())
-	if err != nil {
-		return
-	}
-
+	results := s.statusSnapshot()
 	writeJSON(w, http.StatusOK, results)
 }
 
-// statusSnapshot prevents overlapping Admin UI sweeps. A second browser poll
-// reuses a recent snapshot or joins the in-flight refresh instead of starting
-// another fleet-wide burst of Shelly requests.
-func (s *Server) statusSnapshot(ctx context.Context) ([]ToolStatus, error) {
+func (s *Server) statusSnapshot() []ToolStatus {
+	placeholder := s.statusPlaceholder()
+
 	s.statusMu.Lock()
 
-	if len(s.statusCache) > 0 && time.Since(s.statusCacheAt) < statusCacheTTL {
-		cached := cloneToolStatuses(s.statusCache)
-		s.statusMu.Unlock()
-		return cached, nil
+	if len(s.statusCache) == 0 {
+		s.statusCache = placeholder
 	}
 
-	if refreshDone := s.statusRefreshDone; refreshDone != nil {
-		// If a previous snapshot exists, return it immediately while the single
-		// refresh proceeds. The Admin UI is informational; it must not queue
-		// another device sweep behind the first one.
-		if len(s.statusCache) > 0 {
-			cached := cloneToolStatuses(s.statusCache)
-			s.statusMu.Unlock()
-			return cached, nil
-		}
+	cached := cloneToolStatuses(s.statusCache)
 
-		s.statusMu.Unlock()
-		select {
-		case <-refreshDone:
-			s.statusMu.Lock()
-			cached := cloneToolStatuses(s.statusCache)
-			refreshErr := s.statusRefreshErr
-			s.statusMu.Unlock()
-			if refreshErr != nil {
-				return nil, refreshErr
-			}
-			return cached, nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	cacheFresh := !s.statusCacheAt.IsZero() &&
+		time.Since(s.statusCacheAt) < statusCacheTTL
+
+	startRefresh := !cacheFresh &&
+		!s.statusRefreshInFlight
+
+	if startRefresh {
+		s.statusRefreshInFlight = true
 	}
 
-	refreshDone := make(chan struct{})
-	s.statusRefreshDone = refreshDone
-	s.statusRefreshErr = nil
 	s.statusMu.Unlock()
+
+	if startRefresh {
+		go s.refreshStatuses()
+	}
+
+	return cached
+}
+
+func (s *Server) statusPlaceholder() []ToolStatus {
+	cfg := s.store.ConfigSnapshot()
+	safeOutput := s.store.SafeOutput()
+
+	results := make([]ToolStatus, len(cfg.Tools))
+
+	for i, tool := range cfg.Tools {
+		results[i] = ToolStatus{
+			InterlockName: tool.InterlockName,
+			IP:            tool.IP,
+			Protocol:      config.ToolProtocol(tool),
+			Port:          tool.Port,
+			SwitchID:      tool.SwitchID,
+			Enabled:       tool.Enabled,
+		}
+
+		if tool.Enabled {
+			results[i].Connected = false
+			results[i].Output = safeOutput
+			results[i].Error = "status refresh in progress"
+		}
+	}
+
+	return results
+}
+
+func (s *Server) refreshStatuses() {
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		statusRefreshTimeout,
+	)
+	defer cancel()
 
 	results, err := s.collectStatuses(ctx)
 
 	s.statusMu.Lock()
+
 	if err == nil {
 		s.statusCache = cloneToolStatuses(results)
 		s.statusCacheAt = time.Now()
 	}
-	s.statusRefreshErr = err
-	if s.statusRefreshDone == refreshDone {
-		s.statusRefreshDone = nil
-		close(refreshDone)
-	}
+
+	s.statusRefreshInFlight = false
 	s.statusMu.Unlock()
 
-	return results, err
+	if err != nil {
+		log.Printf(
+			"admin status refresh failed: %v",
+			err,
+		)
+	}
 }
 
 func (s *Server) collectStatuses(ctx context.Context) ([]ToolStatus, error) {
