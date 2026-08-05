@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP="@APP@"
+INSTALL_DIR="@INSTALL_DIR@"
+CONFIG_DIR="@CONFIG_DIR@"
+CONFIG_PATH="@CONFIG_PATH@"
+TLS_DIR="@TLS_DIR@"
+SERVICE_USER="@SERVICE_USER@"
+SERVICE_GROUP="@SERVICE_GROUP@"
+SERVICE_NAME="${APP}.service"
+
+FBS_SOURCE_IP="@FBS_SOURCE_IP@"
+FBS_PORT_RANGE="@FBS_PORT_RANGE@"
+
+REQUIRED_PACKAGES=(
+  lsof
+  curl
+  ca-certificates
+  ufw
+)
+
+EXPECTED_UFW_RULE="ufw allow from ${FBS_SOURCE_IP} to any port ${FBS_PORT_RANGE} proto tcp"
+
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+BIN_SRC="${SOURCE_DIR}/${APP}"
+CONFIG_SRC="${SOURCE_DIR}/config.yaml"
+SERVICE_SRC="${SOURCE_DIR}/${SERVICE_NAME}"
+TLS_SRC="${SOURCE_DIR}/tls"
+SERVER_CA_SRC="${TLS_SRC}/server-ca.crt"
+CLIENT_CERT_SRC="${TLS_SRC}/gateway-client.crt"
+CLIENT_KEY_SRC="${TLS_SRC}/gateway-client.key"
+
+SERVER_CA_PATH="${TLS_DIR}/server-ca.crt"
+CLIENT_CERT_PATH="${TLS_DIR}/gateway-client.crt"
+CLIENT_KEY_PATH="${TLS_DIR}/gateway-client.key"
+
+UPDATE_SERVICE_NAME="${APP}-update.service"
+UPDATE_TIMER_NAME="${APP}-update.timer"
+
+echo "Installing ${APP} from:"
+echo "  ${SOURCE_DIR}"
+echo
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  if command -v pkexec >/dev/null 2>&1; then
+    exec pkexec env \
+      DISPLAY="${DISPLAY:-}" \
+      XAUTHORITY="${XAUTHORITY:-}" \
+      bash "$0" "$@"
+  else
+    echo "Administrator privileges are required."
+    echo "Run this script with:"
+    echo "  sudo ${SOURCE_DIR}/$(basename "$0")"
+    exit 1
+  fi
+fi
+
+pause_existing_auto_update() {
+  local timer_found=false
+  local service_found=false
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "WARNING: systemctl is unavailable; cannot pause an existing auto-updater."
+    echo
+    return
+  fi
+
+  echo "Pausing any existing auto-update units for development testing..."
+
+  if systemctl cat "$UPDATE_TIMER_NAME" >/dev/null 2>&1; then
+    timer_found=true
+
+    if systemctl disable --now "$UPDATE_TIMER_NAME"; then
+      echo "Disabled and stopped auto-update timer:"
+      echo "  $UPDATE_TIMER_NAME"
+    else
+      echo "WARNING: Could not fully disable auto-update timer:"
+      echo "  $UPDATE_TIMER_NAME"
+      echo "Attempting to stop it without disabling it..."
+      systemctl stop "$UPDATE_TIMER_NAME" || true
+    fi
+  fi
+
+  if systemctl cat "$UPDATE_SERVICE_NAME" >/dev/null 2>&1; then
+    service_found=true
+
+    if systemctl is-enabled --quiet "$UPDATE_SERVICE_NAME"; then
+      if systemctl disable --now "$UPDATE_SERVICE_NAME"; then
+        echo "Disabled and stopped auto-update service:"
+        echo "  $UPDATE_SERVICE_NAME"
+      else
+        echo "WARNING: Could not fully disable auto-update service:"
+        echo "  $UPDATE_SERVICE_NAME"
+        echo "Attempting to stop it without disabling it..."
+        systemctl stop "$UPDATE_SERVICE_NAME" || true
+      fi
+    elif systemctl is-active --quiet "$UPDATE_SERVICE_NAME"; then
+      if systemctl stop "$UPDATE_SERVICE_NAME"; then
+        echo "Stopped running auto-update service:"
+        echo "  $UPDATE_SERVICE_NAME"
+      else
+        echo "WARNING: Could not stop running auto-update service:"
+        echo "  $UPDATE_SERVICE_NAME"
+      fi
+    else
+      echo "Auto-update service is not enabled or running:"
+      echo "  $UPDATE_SERVICE_NAME"
+    fi
+  fi
+
+  if [[ "$timer_found" == false && "$service_found" == false ]]; then
+    echo "No existing auto-update timer or service was found."
+  fi
+
+  # Clear stale failed states without failing the development installation.
+  systemctl reset-failed "$UPDATE_TIMER_NAME" "$UPDATE_SERVICE_NAME" \
+    >/dev/null 2>&1 || true
+
+  echo
+}
+
+pause_existing_auto_update
+
+install_missing_dependencies() {
+  local missing_packages=()
+  local package=""
+  local package_status=""
+
+  if ! command -v dpkg-query >/dev/null 2>&1; then
+    echo "ERROR: dpkg-query is required to check installed packages."
+    exit 1
+  fi
+
+  for package in "${REQUIRED_PACKAGES[@]}"; do
+    package_status="$(
+      dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true
+    )"
+
+    if [[ "$package_status" != "install ok installed" ]]; then
+      missing_packages+=("$package")
+    fi
+  done
+
+  if [[ "${#missing_packages[@]}" -eq 0 ]]; then
+    echo "Required dependencies are already installed."
+    echo
+    return
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "ERROR: apt-get is required to install missing dependencies."
+    echo "Missing packages:"
+    printf '  %s\n' "${missing_packages[@]}"
+    exit 1
+  fi
+
+  echo "Installing missing dependencies:"
+  printf '  %s\n' "${missing_packages[@]}"
+  echo
+
+  apt-get update
+
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    --no-install-recommends \
+    "${missing_packages[@]}"
+
+  echo
+  echo "Dependency installation complete."
+  echo
+}
+
+configure_ufw() {
+  local current_input_policy=""
+  local current_output_policy=""
+  local added_rules=""
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    echo "ERROR: ufw is required but is not available."
+    exit 1
+  fi
+
+  echo "Checking UFW configuration..."
+
+  if [[ -r /etc/default/ufw ]]; then
+    current_input_policy="$(
+      sed -n \
+        's/^[[:space:]]*DEFAULT_INPUT_POLICY="\([^"]*\)".*/\1/p' \
+        /etc/default/ufw |
+        head -n 1
+    )"
+
+    current_output_policy="$(
+      sed -n \
+        's/^[[:space:]]*DEFAULT_OUTPUT_POLICY="\([^"]*\)".*/\1/p' \
+        /etc/default/ufw |
+        head -n 1
+    )"
+  fi
+
+  if [[ "$current_input_policy" != "DROP" ]]; then
+    echo "Setting the default incoming policy to deny..."
+    ufw default deny incoming
+  else
+    echo "Default incoming policy is already set to deny."
+  fi
+
+  if [[ "$current_output_policy" != "ACCEPT" ]]; then
+    echo "Setting the default outgoing policy to allow..."
+    ufw default allow outgoing
+  else
+    echo "Default outgoing policy is already set to allow."
+  fi
+
+  added_rules="$(ufw show added 2>/dev/null || true)"
+
+  if grep -Fqx "$EXPECTED_UFW_RULE" <<<"$added_rules"; then
+    echo "Required FBS firewall rule is already present."
+  else
+    echo "Adding the required FBS firewall rule..."
+
+    ufw allow \
+      from "$FBS_SOURCE_IP" \
+      to any \
+      port "$FBS_PORT_RANGE" \
+      proto tcp
+  fi
+
+  if [[ -r /etc/ufw/ufw.conf ]] &&
+    grep -Eq '^[[:space:]]*ENABLED=yes[[:space:]]*$' /etc/ufw/ufw.conf; then
+    echo "UFW is already enabled."
+  else
+    echo "Enabling UFW..."
+    ufw --force enable
+  fi
+
+  echo
+  echo "Current UFW configuration:"
+  ufw status verbose
+  echo
+}
+
+install_missing_dependencies
+configure_ufw
+
+if [[ ! -f "$BIN_SRC" ]]; then
+  echo "ERROR: Missing application binary:"
+  echo "  $BIN_SRC"
+  exit 1
+fi
+
+if [[ ! -f "$CONFIG_SRC" ]]; then
+  echo "ERROR: Missing config file:"
+  echo "  $CONFIG_SRC"
+  exit 1
+fi
+
+if [[ ! -f "$SERVICE_SRC" ]]; then
+  echo "ERROR: Missing service file:"
+  echo "  $SERVICE_SRC"
+  exit 1
+fi
+
+for tls_source in   "$SERVER_CA_SRC"   "$CLIENT_CERT_SRC"   "$CLIENT_KEY_SRC"
+do
+  if [[ ! -f "$tls_source" ]]; then
+    echo "ERROR: Missing gateway TLS file:"
+    echo "  $tls_source"
+    echo
+    echo "Build the Linux deployment only after generating the gateway"
+    echo "certificate and populating the repository tls/ directory."
+    exit 1
+  fi
+done
+
+echo "Creating service group/user if needed..."
+
+if ! getent group "$SERVICE_GROUP" >/dev/null; then
+  groupadd --system "$SERVICE_GROUP"
+fi
+
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+  useradd \
+    --system \
+    --no-create-home \
+    --home-dir "$INSTALL_DIR" \
+    --shell /usr/sbin/nologin \
+    --gid "$SERVICE_GROUP" \
+    "$SERVICE_USER"
+fi
+
+echo "Creating install directory..."
+install -d \
+  -o root \
+  -g "$SERVICE_GROUP" \
+  -m 0750 \
+  "$INSTALL_DIR"
+
+echo "Installing application binary..."
+install \
+  -o root \
+  -g root \
+  -m 0755 \
+  "$BIN_SRC" \
+  "$INSTALL_DIR/$APP"
+
+echo "Creating config directory..."
+install -d \
+  -o "$SERVICE_USER" \
+  -g "$SERVICE_GROUP" \
+  -m 0750 \
+  "$CONFIG_DIR"
+
+
+echo "Creating TLS directory..."
+install -d \
+  -o root \
+  -g "$SERVICE_GROUP" \
+  -m 0750 \
+  "$TLS_DIR"
+
+install_tls_file() {
+  local source_path="$1"
+  local destination_path="$2"
+  local mode="$3"
+  local description="$4"
+
+  if [[ ! -f "$destination_path" ]]; then
+    echo "Installing ${description}..."
+
+    install \
+      -o root \
+      -g "$SERVICE_GROUP" \
+      -m "$mode" \
+      "$source_path" \
+      "$destination_path"
+  else
+    echo "Existing ${description} found; preserving:"
+    echo "  $destination_path"
+
+    chown "root:$SERVICE_GROUP" "$destination_path"
+    chmod "$mode" "$destination_path"
+  fi
+}
+
+install_tls_file \
+  "$SERVER_CA_SRC" \
+  "$SERVER_CA_PATH" \
+  0640 \
+  "Shelly server CA certificate"
+
+install_tls_file \
+  "$CLIENT_CERT_SRC" \
+  "$CLIENT_CERT_PATH" \
+  0640 \
+  "gateway client certificate"
+
+install_tls_file \
+  "$CLIENT_KEY_SRC" \
+  "$CLIENT_KEY_PATH" \
+  0640 \
+  "gateway client private key"
+
+echo "Installing config.yaml..."
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  install \
+    -o "$SERVICE_USER" \
+    -g "$SERVICE_GROUP" \
+    -m 0640 \
+    "$CONFIG_SRC" \
+    "$CONFIG_PATH"
+else
+  echo "Existing config found; preserving:"
+  echo "  $CONFIG_PATH"
+
+  chown "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_PATH"
+  chmod 0640 "$CONFIG_PATH"
+fi
+
+echo "Installing systemd service..."
+install \
+  -o root \
+  -g root \
+  -m 0644 \
+  "$SERVICE_SRC" \
+  "/etc/systemd/system/$SERVICE_NAME"
+
+echo "Development install: auto-update files will not be installed."
+echo
+
+echo "Verifying gateway TLS file access..."
+
+for tls_path in   "$SERVER_CA_PATH"   "$CLIENT_CERT_PATH"   "$CLIENT_KEY_PATH"
+do
+  if ! runuser -u "$SERVICE_USER" -- test -r "$tls_path"; then
+    echo "ERROR: Service user cannot read TLS file:"
+    echo "  $tls_path"
+    exit 1
+  fi
+done
+
+echo "Reloading systemd..."
+systemctl daemon-reload
+
+echo "Enabling service..."
+systemctl enable "$SERVICE_NAME"
+
+echo "Restarting service..."
+systemctl restart "$SERVICE_NAME"
+
+echo
+echo "Development install complete."
+echo "Auto-update remains disabled/stopped for testing."
+echo "Run the normal install.sh to restore managed auto-updates."
+echo
+
+systemctl --no-pager --full status "$SERVICE_NAME"

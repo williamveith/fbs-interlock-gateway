@@ -154,6 +154,14 @@ chmod +x install.sh update.sh fbs-interlock-gateway
 sudo ./install.sh
 ```
 
+To install the dev version do:
+
+```bash
+cd ~/Downloads/linux
+chmod +x install-dev.sh update.sh fbs-interlock-gateway
+sudo ./install-dev.sh
+```
+
 ## What the Installer Does
 
 The installer performs the following actions:

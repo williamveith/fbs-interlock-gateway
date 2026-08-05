@@ -50,6 +50,9 @@ SERVICE_OUT := $(LINUX_DIR)/$(APP).service
 INSTALL_TEMPLATE := $(SERVICE_DIR_LINUX)/install-linux.sh.in
 INSTALL_OUT := $(LINUX_DIR)/install.sh
 
+INSTALL_DEV_TEMPLATE := $(SERVICE_DIR_LINUX)/install-linux-dev.sh.in
+INSTALL_DEV_OUT := $(LINUX_DIR)/install-dev.sh
+
 UPDATE_TEMPLATE := $(SERVICE_DIR_LINUX)/update-linux.sh.in
 UPDATE_OUT := $(LINUX_DIR)/update.sh
 
@@ -229,6 +232,21 @@ $(INSTALL_OUT): $(INSTALL_TEMPLATE) Makefile
 		"$(INSTALL_TEMPLATE)" > "$@"
 	chmod +x "$@"
 
+$(INSTALL_DEV_OUT): $(INSTALL_DEV_TEMPLATE) Makefile
+	mkdir -p "$(LINUX_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
+		-e 's|@CONFIG_DIR@|$(CONFIG_DIR)|g' \
+		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
+		-e 's|@TLS_DIR@|$(TLS_DIR)|g' \
+		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
+		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
+		-e 's|@FBS_SOURCE_IP@|$(FBS_SOURCE_IP)|g' \
+		-e 's|@FBS_PORT_RANGE@|$(FBS_PORT_RANGE)|g' \
+		"$(INSTALL_DEV_TEMPLATE)" > "$@"
+	chmod +x "$@"
+
 $(UPDATE_OUT): $(UPDATE_TEMPLATE) Makefile
 	mkdir -p "$(LINUX_DIR)"
 	sed \
@@ -360,7 +378,7 @@ init-config:
 			'bind: 0.0.0.0' \
 			'' \
 			'defaults:' \
-			'  timeout_ms: 3000' \
+			'  timeout_ms: 10000' \
 			'  safe_state_on_error: "off"' \
 			'  shelly_tls:' \
 			'    server_ca_file: "./tls/server-ca.crt"' \
@@ -428,7 +446,7 @@ build-darwin-amd64: fmt $(MACOS_AMD64_DEPLOYMENT_FILES)
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-arm64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-arm64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
@@ -439,7 +457,7 @@ build-linux-arm64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-amd64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-amd64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
@@ -548,6 +566,7 @@ scripts-check:
 	bash -n scripts/tls/*.sh
 	bash -n \
 		"$(INSTALL_TEMPLATE)" \
+		"$(INSTALL_DEV_TEMPLATE)" \
 		"$(UPDATE_TEMPLATE)" \
 		"$(MACOS_INSTALL_TEMPLATE)" \
 		"$(MACOS_START_TEMPLATE)" \
