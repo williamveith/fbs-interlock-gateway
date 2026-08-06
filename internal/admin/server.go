@@ -51,6 +51,13 @@ type StatusClient interface {
 	) (shelly.SwitchStatus, error)
 }
 
+type priorityStatusClient interface {
+	GetStatusAdmin(
+		ctx context.Context,
+		tool config.Tool,
+	) (shelly.SwitchStatus, error)
+}
+
 type Server struct {
 	addr             string
 	store            ConfigStore
@@ -562,7 +569,13 @@ func (s *Server) collectStatuses(
 				}
 
 				switchStatus, err :=
-					s.statusClient.GetStatus(ctx, tool)
+					s.getAdminStatus(ctx, tool)
+
+				if errors.Is(err, shelly.ErrAdminStatusDeferred) {
+					// Preserve the existing row. The FBS operation that displaced
+					// this probe will publish the authoritative result.
+					continue
+				}
 
 				if err != nil {
 					s.statusStore.RecordFailure(
@@ -600,6 +613,20 @@ sendJobs:
 	workers.Wait()
 
 	return ctx.Err()
+}
+
+func (s *Server) getAdminStatus(
+	ctx context.Context,
+	tool config.Tool,
+) (shelly.SwitchStatus, error) {
+	if client, ok := s.statusClient.(priorityStatusClient); ok {
+		return client.GetStatusAdmin(ctx, tool)
+	}
+
+	// Preserve compatibility with test doubles and alternate clients that only
+	// implement the original status method. The production Shelly client uses
+	// GetStatusAdmin and receives priority-aware behavior.
+	return s.statusClient.GetStatus(ctx, tool)
 }
 
 func adminToolStatus(tool config.Tool) ToolStatus {

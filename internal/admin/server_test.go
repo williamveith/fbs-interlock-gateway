@@ -51,13 +51,35 @@ type fakeStatusClient struct {
 		ctx context.Context,
 		tool config.Tool,
 	) (shelly.SwitchStatus, error)
+
+	getStatusAdmin func(
+		ctx context.Context,
+		tool config.Tool,
+	) (shelly.SwitchStatus, error)
 }
 
 func (f fakeStatusClient) GetStatus(
 	ctx context.Context,
 	tool config.Tool,
 ) (shelly.SwitchStatus, error) {
+	if f.getStatus == nil {
+		return shelly.SwitchStatus{},
+			errors.New("unexpected GetStatus call")
+	}
+
 	return f.getStatus(ctx, tool)
+}
+
+func (f fakeStatusClient) GetStatusAdmin(
+	ctx context.Context,
+	tool config.Tool,
+) (shelly.SwitchStatus, error) {
+	if f.getStatusAdmin != nil {
+		return f.getStatusAdmin(ctx, tool)
+	}
+
+	// Preserve all existing tests that initialize only getStatus.
+	return f.GetStatus(ctx, tool)
 }
 
 func newTestAdminServer(
@@ -1406,6 +1428,78 @@ func TestCollectStatusesPublishesAndPreservesPartialResults(
 		t.Fatalf(
 			"completed result was discarded after cancellation: %#v",
 			rows[0],
+		)
+	}
+}
+
+func TestCollectStatusesPreservesRowWhenAdminStatusDeferred(
+	t *testing.T,
+) {
+	tool := config.Tool{
+		InterlockName: "TEST",
+		IP:            "192.0.2.10",
+		Port:          8081,
+		SwitchID:      0,
+		Enabled:       true,
+	}
+
+	store := &fakeConfigStore{
+		cfg: config.Config{
+			Tools: []config.Tool{tool},
+		},
+	}
+
+	server := newTestAdminServer(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{
+			getStatusAdmin: func(
+				context.Context,
+				config.Tool,
+			) (shelly.SwitchStatus, error) {
+				return shelly.SwitchStatus{},
+					shelly.ErrAdminStatusDeferred
+			},
+		},
+		nil,
+	)
+
+	// Seed an existing valid result that the deferred Admin probe
+	// must not replace with an error.
+	fbsRevision := server.statusStore.NextRevision()
+	server.statusStore.RecordSuccess(
+		tool,
+		true,
+		fbsRevision,
+	)
+
+	adminRevision := server.statusStore.NextRevision()
+
+	if err := server.collectStatuses(
+		context.Background(),
+		adminRevision,
+	); err != nil {
+		t.Fatalf("collectStatuses() error = %v", err)
+	}
+
+	rows := server.statusStore.Snapshot()
+
+	if len(rows) != 1 {
+		t.Fatalf("status count = %d, want 1", len(rows))
+	}
+
+	if !rows[0].Connected {
+		t.Fatal("deferred Admin status replaced connected state")
+	}
+
+	if !rows[0].Output {
+		t.Fatal("deferred Admin status replaced output=true")
+	}
+
+	if rows[0].Error != "" {
+		t.Fatalf(
+			"deferred Admin status recorded error %q",
+			rows[0].Error,
 		)
 	}
 }
