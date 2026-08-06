@@ -14,6 +14,7 @@ MAC_AMD64_TLS_DIR := $(MAC_AMD64_DIR)/tls
 LINUX_DIR := $(BUILD_DIR)/linux
 LINUX_TLS_DIR := $(LINUX_DIR)/tls
 WINDOWS_DIR := $(BUILD_DIR)/windows
+WINDOWS_TLS_BUILD_DIR := $(WINDOWS_DIR)/tls
 
 CONFIGS := config.yaml
 CONFIG_DIR ?= /etc/$(APP)
@@ -67,6 +68,9 @@ INSTALL_OUT := $(LINUX_DIR)/install.sh
 INSTALL_DEV_TEMPLATE := $(SERVICE_DIR_LINUX)/install-linux-dev.sh.in
 INSTALL_DEV_OUT := $(LINUX_DIR)/install-dev.sh
 
+UNINSTALL_TEMPLATE := $(SERVICE_DIR_LINUX)/uninstall-linux.sh.in
+UNINSTALL_OUT := $(LINUX_DIR)/uninstall.sh
+
 UPDATE_TEMPLATE := $(SERVICE_DIR_LINUX)/update-linux.sh.in
 UPDATE_OUT := $(LINUX_DIR)/update.sh
 
@@ -80,23 +84,36 @@ UPDATE_TIMER_OUT := $(LINUX_DIR)/$(APP)-update.timer
 # WINDOWS SERVICE CONFIGS
 # =========================
 WINDOWS_INSTALL_DIR ?= C:/FBS/$(APP)
+WINDOWS_CONFIG_DIR ?= $(WINDOWS_INSTALL_DIR)
+WINDOWS_CONFIG_PATH ?= $(WINDOWS_CONFIG_DIR)/config.yaml
+WINDOWS_TLS_DIR ?= $(WINDOWS_CONFIG_DIR)/tls
+WINDOWS_LOG_DIR ?= $(WINDOWS_CONFIG_DIR)/logs
 
 WINDOWS_START_TEMPLATE := $(SERVICE_DIR_WINDOWS)/start.bat.in
 WINDOWS_INSTALL_BAT_TEMPLATE := $(SERVICE_DIR_WINDOWS)/install.bat.in
+WINDOWS_INSTALL_DEV_BAT_TEMPLATE := $(SERVICE_DIR_WINDOWS)/install-dev.bat.in
 WINDOWS_INSTALL_PS1_TEMPLATE := $(SERVICE_DIR_WINDOWS)/install.ps1.in
+WINDOWS_UPDATE_BAT_TEMPLATE := $(SERVICE_DIR_WINDOWS)/update.bat.in
+WINDOWS_UPDATE_PS1_TEMPLATE := $(SERVICE_DIR_WINDOWS)/update.ps1.in
 WINDOWS_UNINSTALL_BAT_TEMPLATE := $(SERVICE_DIR_WINDOWS)/uninstall.bat.in
 WINDOWS_UNINSTALL_PS1_TEMPLATE := $(SERVICE_DIR_WINDOWS)/uninstall.ps1.in
 
 WINDOWS_START_OUT := $(WINDOWS_DIR)/start.bat
 WINDOWS_INSTALL_BAT_OUT := $(WINDOWS_DIR)/install.bat
+WINDOWS_INSTALL_DEV_BAT_OUT := $(WINDOWS_DIR)/install-dev.bat
 WINDOWS_INSTALL_PS1_OUT := $(WINDOWS_DIR)/install.ps1
+WINDOWS_UPDATE_BAT_OUT := $(WINDOWS_DIR)/update.bat
+WINDOWS_UPDATE_PS1_OUT := $(WINDOWS_DIR)/update.ps1
 WINDOWS_UNINSTALL_BAT_OUT := $(WINDOWS_DIR)/uninstall.bat
 WINDOWS_UNINSTALL_PS1_OUT := $(WINDOWS_DIR)/uninstall.ps1
 
 WINDOWS_DEPLOYMENT_FILES := \
 	$(WINDOWS_START_OUT) \
 	$(WINDOWS_INSTALL_BAT_OUT) \
+	$(WINDOWS_INSTALL_DEV_BAT_OUT) \
 	$(WINDOWS_INSTALL_PS1_OUT) \
+	$(WINDOWS_UPDATE_BAT_OUT) \
+	$(WINDOWS_UPDATE_PS1_OUT) \
 	$(WINDOWS_UNINSTALL_BAT_OUT) \
 	$(WINDOWS_UNINSTALL_PS1_OUT)
 
@@ -289,6 +306,21 @@ $(INSTALL_DEV_OUT): $(INSTALL_DEV_TEMPLATE) Makefile
 		"$(INSTALL_DEV_TEMPLATE)" > "$@"
 	chmod +x "$@"
 
+$(UNINSTALL_OUT): $(UNINSTALL_TEMPLATE) Makefile
+	mkdir -p "$(LINUX_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
+		-e 's|@CONFIG_DIR@|$(CONFIG_DIR)|g' \
+		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
+		-e 's|@TLS_DIR@|$(TLS_DIR)|g' \
+		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
+		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
+		-e 's|@FBS_SOURCE_IP@|$(FBS_SOURCE_IP)|g' \
+		-e 's|@FBS_PORT_RANGE@|$(FBS_PORT_RANGE)|g' \
+		"$(UNINSTALL_TEMPLATE)" > "$@"
+	chmod +x "$@"
+
 $(UPDATE_OUT): $(UPDATE_TEMPLATE) Makefile
 	mkdir -p "$(LINUX_DIR)"
 	sed \
@@ -322,34 +354,60 @@ $(WINDOWS_START_OUT): $(WINDOWS_START_TEMPLATE) Makefile
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		-e 's|@WINDOWS_CONFIG_DIR@|$(WINDOWS_CONFIG_DIR)|g' \
+		-e 's|@WINDOWS_CONFIG_PATH@|$(WINDOWS_CONFIG_PATH)|g' \
+		-e 's|@WINDOWS_LOG_DIR@|$(WINDOWS_LOG_DIR)|g' \
 		"$(WINDOWS_START_TEMPLATE)" > "$@"
 
 $(WINDOWS_INSTALL_BAT_OUT): $(WINDOWS_INSTALL_BAT_TEMPLATE) Makefile
 	mkdir -p "$(WINDOWS_DIR)"
-	sed \
-		-e 's|@APP@|$(APP)|g' \
-		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
-		"$(WINDOWS_INSTALL_BAT_TEMPLATE)" > "$@"
+	cp "$(WINDOWS_INSTALL_BAT_TEMPLATE)" "$@"
+
+$(WINDOWS_INSTALL_DEV_BAT_OUT): $(WINDOWS_INSTALL_DEV_BAT_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	cp "$(WINDOWS_INSTALL_DEV_BAT_TEMPLATE)" "$@"
 
 $(WINDOWS_INSTALL_PS1_OUT): $(WINDOWS_INSTALL_PS1_TEMPLATE) Makefile
 	mkdir -p "$(WINDOWS_DIR)"
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		-e 's|@WINDOWS_CONFIG_DIR@|$(WINDOWS_CONFIG_DIR)|g' \
+		-e 's|@WINDOWS_CONFIG_PATH@|$(WINDOWS_CONFIG_PATH)|g' \
+		-e 's|@WINDOWS_TLS_DIR@|$(WINDOWS_TLS_DIR)|g' \
+		-e 's|@WINDOWS_LOG_DIR@|$(WINDOWS_LOG_DIR)|g' \
+		-e 's|@FBS_SOURCE_IP@|$(FBS_SOURCE_IP)|g' \
+		-e 's|@FBS_PORT_RANGE@|$(FBS_PORT_RANGE)|g' \
 		"$(WINDOWS_INSTALL_PS1_TEMPLATE)" > "$@"
 
-$(WINDOWS_UNINSTALL_BAT_OUT): $(WINDOWS_UNINSTALL_BAT_TEMPLATE) Makefile
+$(WINDOWS_UPDATE_BAT_OUT): $(WINDOWS_UPDATE_BAT_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	sed \
+		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		-e 's|@WINDOWS_LOG_DIR@|$(WINDOWS_LOG_DIR)|g' \
+		"$(WINDOWS_UPDATE_BAT_TEMPLATE)" > "$@"
+
+$(WINDOWS_UPDATE_PS1_OUT): $(WINDOWS_UPDATE_PS1_TEMPLATE) Makefile
 	mkdir -p "$(WINDOWS_DIR)"
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
-		"$(WINDOWS_UNINSTALL_BAT_TEMPLATE)" > "$@"
+		-e 's|@WINDOWS_LOG_DIR@|$(WINDOWS_LOG_DIR)|g' \
+		"$(WINDOWS_UPDATE_PS1_TEMPLATE)" > "$@"
+
+$(WINDOWS_UNINSTALL_BAT_OUT): $(WINDOWS_UNINSTALL_BAT_TEMPLATE) Makefile
+	mkdir -p "$(WINDOWS_DIR)"
+	cp "$(WINDOWS_UNINSTALL_BAT_TEMPLATE)" "$@"
 
 $(WINDOWS_UNINSTALL_PS1_OUT): $(WINDOWS_UNINSTALL_PS1_TEMPLATE) Makefile
 	mkdir -p "$(WINDOWS_DIR)"
 	sed \
 		-e 's|@APP@|$(APP)|g' \
 		-e 's|@WINDOWS_INSTALL_DIR@|$(WINDOWS_INSTALL_DIR)|g' \
+		-e 's|@WINDOWS_CONFIG_DIR@|$(WINDOWS_CONFIG_DIR)|g' \
+		-e 's|@WINDOWS_CONFIG_PATH@|$(WINDOWS_CONFIG_PATH)|g' \
+		-e 's|@WINDOWS_TLS_DIR@|$(WINDOWS_TLS_DIR)|g' \
+		-e 's|@WINDOWS_LOG_DIR@|$(WINDOWS_LOG_DIR)|g' \
 		"$(WINDOWS_UNINSTALL_PS1_TEMPLATE)" > "$@"
 
 windows-deployment-files: $(WINDOWS_DEPLOYMENT_FILES)
@@ -573,6 +631,21 @@ define copy_linux_tls
 endef
 
 
+define copy_windows_tls
+	rm -rf "$(WINDOWS_TLS_BUILD_DIR)"
+	mkdir -p "$(WINDOWS_TLS_BUILD_DIR)"
+	install -m 0644 \
+		"$(TLS_SERVER_CA_SOURCE)" \
+		"$(WINDOWS_TLS_BUILD_DIR)/server-ca.crt"
+	install -m 0644 \
+		"$(TLS_CLIENT_CERT_SOURCE)" \
+		"$(WINDOWS_TLS_BUILD_DIR)/gateway-client.crt"
+	install -m 0600 \
+		"$(TLS_CLIENT_KEY_SOURCE)" \
+		"$(WINDOWS_TLS_BUILD_DIR)/gateway-client.key"
+endef
+
+
 define copy_macos_tls
 	rm -rf "$(1)"
 	mkdir -p "$(1)"
@@ -608,7 +681,7 @@ build-darwin-amd64: fmt check-runtime-tls macos-amd64-deployment-guides $(MACOS_
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
@@ -618,7 +691,7 @@ build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
@@ -628,9 +701,10 @@ build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-windows-amd64: fmt windows-deployment-guides $(WINDOWS_DEPLOYMENT_FILES)
+build-windows-amd64: fmt check-runtime-tls windows-deployment-guides $(WINDOWS_DEPLOYMENT_FILES)
 	mkdir -p "$(WINDOWS_DIR)"
 	cp "$(CONFIGS)" "$(WINDOWS_DIR)/"
+	$(copy_windows_tls)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
@@ -726,12 +800,25 @@ scripts-check:
 	bash -n \
 		"$(INSTALL_TEMPLATE)" \
 		"$(INSTALL_DEV_TEMPLATE)" \
+		"$(UNINSTALL_TEMPLATE)" \
 		"$(UPDATE_TEMPLATE)" \
 		"$(MACOS_INSTALL_TEMPLATE)" \
 		"$(MACOS_INSTALL_DEV_TEMPLATE)" \
 		"$(MACOS_START_TEMPLATE)" \
 		"$(MACOS_UNINSTALL_TEMPLATE)" \
 		"$(MACOS_UPDATE_TEMPLATE)"
+	@if command -v pwsh >/dev/null 2>&1; then \
+		pwsh -NoLogo -NoProfile -Command '\
+			$$failed = $$false; \
+			foreach ($$path in @("$(WINDOWS_INSTALL_PS1_TEMPLATE)", "$(WINDOWS_UPDATE_PS1_TEMPLATE)", "$(WINDOWS_UNINSTALL_PS1_TEMPLATE)")) { \
+				$$tokens = $$null; $$errors = $$null; \
+				[void][System.Management.Automation.Language.Parser]::ParseFile($$path, [ref]$$tokens, [ref]$$errors); \
+				if ($$errors.Count -gt 0) { $$errors | ForEach-Object { Write-Error "$${path}: $$($_.Message)" }; $$failed = $$true } \
+			}; \
+			if ($$failed) { exit 1 }'; \
+	else \
+		echo "Skipping PowerShell syntax validation: pwsh unavailable."; \
+	fi
 	@if command -v plutil >/dev/null 2>&1; then \
 		plutil -lint "$(MACOS_PLIST_TEMPLATE)"; \
 		plutil -lint "$(MACOS_UPDATE_PLIST_TEMPLATE)"; \

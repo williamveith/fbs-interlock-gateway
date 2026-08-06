@@ -2,88 +2,164 @@
 
 [CmdletBinding()]
 param(
-    [switch]$RemoveConfiguration
+    [Alias('RemoveConfiguration')]
+    [switch]$Purge
 )
 
+Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $AppName = '@APP@'
 $TaskName = 'FBS Interlock Gateway'
-$FirewallRuleName = 'FBS Interlock Gateway'
-$InstallDirectory = '@WINDOWS_INSTALL_DIR@'
-$ConfigPath = Join-Path $InstallDirectory 'config.yaml'
+$UpdateTaskName = 'FBS Interlock Gateway Update'
+$LegacyFirewallRuleName = 'FBS Interlock Gateway'
+$FirewallRuleName = 'FBS Interlock Gateway - Authorized FBS Source'
 
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$InstallDirectory = [IO.Path]::GetFullPath('@WINDOWS_INSTALL_DIR@')
+$ConfigDirectory = [IO.Path]::GetFullPath('@WINDOWS_CONFIG_DIR@')
+$ConfigPath = [IO.Path]::GetFullPath('@WINDOWS_CONFIG_PATH@')
+$TlsDirectory = [IO.Path]::GetFullPath('@WINDOWS_TLS_DIR@')
+$LogDirectory = [IO.Path]::GetFullPath('@WINDOWS_LOG_DIR@')
 
-if (-not $principal.IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-)) {
-    throw 'Administrator privileges are required to uninstall the gateway.'
+function Assert-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+
+    if (-not $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )) {
+        throw 'Administrator privileges are required to uninstall the gateway.'
+    }
 }
 
-Write-Host 'Stopping the gateway...'
+function Stop-And-RemoveTask {
+    param([Parameter(Mandatory)][string]$Name)
 
-Stop-ScheduledTask `
-    -TaskName $TaskName `
-    -ErrorAction SilentlyContinue
-
-Get-Process `
-    -Name $AppName `
-    -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
-
-Write-Host 'Removing the scheduled task...'
-
-Unregister-ScheduledTask `
-    -TaskName $TaskName `
-    -Confirm:$false `
-    -ErrorAction SilentlyContinue
-
-Write-Host 'Removing the Windows Firewall rule...'
-
-Get-NetFirewallRule `
-    -DisplayName $FirewallRuleName `
-    -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule `
+    Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask `
+        -TaskName $Name `
+        -Confirm:$false `
         -ErrorAction SilentlyContinue
+}
 
-if (Test-Path -LiteralPath $InstallDirectory) {
-    if (
-        -not $RemoveConfiguration -and
-        (Test-Path -LiteralPath $ConfigPath)
-    ) {
-        $temporaryConfig = Join-Path $env:TEMP "$AppName-config.yaml"
+function Remove-FirewallRuleIfPresent {
+    param([Parameter(Mandatory)][string]$Name)
 
-        Copy-Item `
-            -LiteralPath $ConfigPath `
-            -Destination $temporaryConfig `
-            -Force
+    Get-NetFirewallRule `
+        -DisplayName $Name `
+        -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
+
+function Preserve-PersistentDataInsideInstallDirectory {
+    $preserveDirectory = Join-Path (
+        Split-Path -Parent $InstallDirectory
+    ) (
+        '{0}-preserve-{1}' -f $AppName, [Guid]::NewGuid().ToString('N')
+    )
+
+    New-Item -ItemType Directory -Path $preserveDirectory -Force | Out-Null
+
+    try {
+        $items = @(
+            @{ Path = $ConfigPath; Name = 'config.yaml' },
+            @{ Path = $TlsDirectory; Name = 'tls' },
+            @{ Path = $LogDirectory; Name = 'logs' }
+        )
+
+        foreach ($item in $items) {
+            if (Test-Path -LiteralPath $item.Path) {
+                Move-Item `
+                    -LiteralPath $item.Path `
+                    -Destination (Join-Path $preserveDirectory $item.Name) `
+                    -Force
+            }
+        }
 
         Remove-Item `
             -LiteralPath $InstallDirectory `
             -Recurse `
-            -Force
+            -Force `
+            -ErrorAction SilentlyContinue
 
-        New-Item `
-            -ItemType Directory `
-            -Path $InstallDirectory `
-            -Force |
-            Out-Null
+        New-Item -ItemType Directory -Path $InstallDirectory -Force | Out-Null
 
-        Move-Item `
-            -LiteralPath $temporaryConfig `
-            -Destination $ConfigPath `
-            -Force
+        foreach ($item in $items) {
+            $preservedPath = Join-Path $preserveDirectory $item.Name
+            if (Test-Path -LiteralPath $preservedPath) {
+                Move-Item `
+                    -LiteralPath $preservedPath `
+                    -Destination $item.Path `
+                    -Force
+            }
+        }
+    }
+    finally {
+        Remove-Item `
+            -LiteralPath $preserveDirectory `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+}
 
-        Write-Host "Preserved configuration file: $ConfigPath"
+Assert-Administrator
+
+Write-Host 'Stopping and removing the managed tasks...'
+Stop-And-RemoveTask -Name $UpdateTaskName
+Stop-And-RemoveTask -Name $TaskName
+
+Get-Process -Name $AppName -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+
+Write-Host 'Removing Windows Defender Firewall rules...'
+Remove-FirewallRuleIfPresent -Name $LegacyFirewallRuleName
+Remove-FirewallRuleIfPresent -Name $FirewallRuleName
+
+if ($Purge) {
+    Write-Host 'Purging application files, configuration, TLS files, and logs...'
+
+    $pathsToRemove = @(
+        $InstallDirectory,
+        $ConfigDirectory,
+        $TlsDirectory,
+        $LogDirectory
+    ) | Select-Object -Unique
+
+    foreach ($path in $pathsToRemove) {
+        Remove-Item `
+            -LiteralPath $path `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+}
+else {
+    Write-Host 'Removing executable and managed scripts while preserving persistent data...'
+
+    if ($ConfigDirectory -eq $InstallDirectory) {
+        Preserve-PersistentDataInsideInstallDirectory
     }
     else {
         Remove-Item `
             -LiteralPath $InstallDirectory `
             -Recurse `
-            -Force
+            -Force `
+            -ErrorAction SilentlyContinue
     }
 }
 
+Write-Host ''
 Write-Host 'The FBS Interlock Gateway was uninstalled.'
+
+if ($Purge) {
+    Write-Host 'Persistent gateway data was removed.'
+}
+else {
+    Write-Host 'The production configuration was preserved at:'
+    Write-Host "  $ConfigPath"
+    Write-Host 'The gateway TLS files were preserved at:'
+    Write-Host "  $TlsDirectory"
+    Write-Host 'The gateway logs were preserved at:'
+    Write-Host "  $LogDirectory"
+}

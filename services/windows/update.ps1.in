@@ -1,0 +1,380 @@
+#Requires -Version 5.1
+
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+
+$AppName = '@APP@'
+$TaskName = 'FBS Interlock Gateway'
+$InstallDirectory = [IO.Path]::GetFullPath('@WINDOWS_INSTALL_DIR@')
+$LogDirectory = [IO.Path]::GetFullPath('@WINDOWS_LOG_DIR@')
+$AdminStatusUrl = 'http://127.0.0.1:18090/api/status'
+
+$Repository = 'williamveith/fbs-interlock-gateway'
+$AssetName = "$AppName-windows-amd64.exe"
+$BaseUrl = "https://github.com/$Repository/releases/latest/download"
+$BinaryUrl = "$BaseUrl/$AssetName"
+$ChecksumUrl = "$BaseUrl/$AssetName.sha256"
+$CurrentBinary = Join-Path $InstallDirectory "$AppName.exe"
+$LockDirectory = Join-Path $InstallDirectory '.update-lock'
+
+$MaximumLogBytes = 10MB
+$LogArchiveCount = 30
+
+function Assert-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+
+    if (-not $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )) {
+        throw 'Administrator privileges are required to update the gateway.'
+    }
+}
+
+function Get-PeMachine {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $reader = $null
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+
+    try {
+        $reader = [IO.BinaryReader]::new($stream)
+
+        if ($reader.ReadUInt16() -ne 0x5A4D) {
+            throw "The file is not a Windows PE executable: $Path"
+        }
+
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadInt32()
+        $stream.Position = $peOffset
+
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "The file has an invalid PE signature: $Path"
+        }
+
+        return $reader.ReadUInt16()
+    }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+        $stream.Dispose()
+    }
+}
+
+function Assert-Amd64Binary {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $machine = Get-PeMachine -Path $Path
+    if ($machine -ne 0x8664) {
+        throw ('The downloaded executable is not amd64. PE machine: 0x{0:X4}' -f $machine)
+    }
+
+    $versionOutput = & $Path -version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "The downloaded executable failed validation with exit code $LASTEXITCODE."
+    }
+
+    $versionText = ($versionOutput | Out-String).Trim()
+    if ($versionText) {
+        Write-Host "Downloaded version: $versionText"
+    }
+}
+
+function Get-Sha256 {
+    param([Parameter(Mandatory)][string]$Path)
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Invoke-Download {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][string]$OutFile
+    )
+
+    $lastError = $null
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest `
+                -Uri $Uri `
+                -OutFile $OutFile `
+                -UseBasicParsing `
+                -TimeoutSec 60
+            return
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt 3) {
+                Start-Sleep -Seconds $attempt
+            }
+        }
+    }
+
+    throw $lastError
+}
+
+function Test-LogNeedsRotation {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    return ((Get-Item -LiteralPath $Path).Length -ge $MaximumLogBytes)
+}
+
+function Rotate-Log {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $oldestArchive = "$Path.$LogArchiveCount.zip"
+    Remove-Item -LiteralPath $oldestArchive -Force -ErrorAction SilentlyContinue
+
+    for ($index = $LogArchiveCount - 1; $index -ge 1; $index--) {
+        $sourceArchive = "$Path.$index.zip"
+        $destinationArchive = "$Path.$($index + 1).zip"
+
+        if (Test-Path -LiteralPath $sourceArchive -PathType Leaf) {
+            Move-Item `
+                -LiteralPath $sourceArchive `
+                -Destination $destinationArchive `
+                -Force
+        }
+    }
+
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $stagedLog = "$Path.1"
+        Move-Item -LiteralPath $Path -Destination $stagedLog -Force
+        Compress-Archive `
+            -LiteralPath $stagedLog `
+            -DestinationPath "$Path.1.zip" `
+            -CompressionLevel Optimal `
+            -Force
+        Remove-Item -LiteralPath $stagedLog -Force
+    }
+
+    New-Item -ItemType File -Path $Path -Force | Out-Null
+}
+
+function Test-GatewayTaskRegistered {
+    return ($null -ne (
+        Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    ))
+}
+
+function Stop-Gateway {
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+
+    Get-Process -Name $AppName -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+
+    Start-Sleep -Seconds 1
+}
+
+function Start-Gateway {
+    Start-ScheduledTask -TaskName $TaskName
+}
+
+function Wait-ForAdminApi {
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        try {
+            $response = Invoke-WebRequest `
+                -Uri $AdminStatusUrl `
+                -UseBasicParsing `
+                -TimeoutSec 2
+
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+                return $true
+            }
+        }
+        catch {
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    return $false
+}
+
+Assert-Administrator
+
+if (-not (Test-Path -LiteralPath $InstallDirectory -PathType Container)) {
+    throw "Install directory does not exist: $InstallDirectory"
+}
+
+if (Test-Path -LiteralPath $LockDirectory -PathType Container) {
+    $lockAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $LockDirectory).LastWriteTimeUtc
+    if ($lockAge.TotalHours -ge 2) {
+        Remove-Item -LiteralPath $LockDirectory -Recurse -Force
+    }
+}
+
+try {
+    New-Item -ItemType Directory -Path $LockDirectory -ErrorAction Stop | Out-Null
+}
+catch {
+    Write-Host 'Another update or maintenance operation is already running; exiting.'
+    exit 0
+}
+
+$tempDirectory = Join-Path $env:TEMP (
+    '{0}-update-{1}' -f $AppName, [Guid]::NewGuid().ToString('N')
+)
+New-Item -ItemType Directory -Path $tempDirectory -Force | Out-Null
+
+try {
+    Write-Host "Checking the latest release for $AppName..."
+    Write-Host 'Architecture: windows-amd64'
+
+    $checksumPath = Join-Path $tempDirectory "$AssetName.sha256"
+    Write-Host 'Downloading the latest checksum...'
+    Invoke-Download -Uri $ChecksumUrl -OutFile $checksumPath
+
+    $checksumText = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+    $expectedSha = ($checksumText -split '\s+')[0].ToLowerInvariant()
+
+    if ($expectedSha -notmatch '^[0-9a-f]{64}$') {
+        throw 'The release checksum file contains an invalid SHA-256 value.'
+    }
+
+    $updateRequired = $true
+    if (Test-Path -LiteralPath $CurrentBinary -PathType Leaf) {
+        $currentSha = Get-Sha256 -Path $CurrentBinary
+        Write-Host "Installed checksum: $currentSha"
+        Write-Host "Latest checksum:    $expectedSha"
+
+        if ($currentSha -eq $expectedSha) {
+            $updateRequired = $false
+        }
+    }
+
+    $gatewayLog = Join-Path $LogDirectory 'gateway.log'
+    $gatewayErrorLog = Join-Path $LogDirectory 'gateway-error.log'
+    $rotateGatewayLog = Test-LogNeedsRotation -Path $gatewayLog
+    $rotateGatewayErrorLog = Test-LogNeedsRotation -Path $gatewayErrorLog
+
+    if (-not $updateRequired -and
+        -not $rotateGatewayLog -and
+        -not $rotateGatewayErrorLog) {
+        Write-Host 'Already running the latest binary; logs are within limits.'
+        exit 0
+    }
+
+    $downloadPath = Join-Path $tempDirectory $AssetName
+    if ($updateRequired) {
+        Write-Host 'Downloading the latest executable...'
+        Invoke-Download -Uri $BinaryUrl -OutFile $downloadPath
+
+        $downloadedSha = Get-Sha256 -Path $downloadPath
+        if ($downloadedSha -ne $expectedSha) {
+            throw @"
+Downloaded executable checksum mismatch.
+Expected: $expectedSha
+Received: $downloadedSha
+"@
+        }
+
+        Assert-Amd64Binary -Path $downloadPath
+    }
+
+    $taskRegistered = Test-GatewayTaskRegistered
+    $backupPath = $null
+    $existingAcl = $null
+
+    if (Test-Path -LiteralPath $CurrentBinary -PathType Leaf) {
+        $existingAcl = Get-Acl -LiteralPath $CurrentBinary
+    }
+
+    if ($updateRequired -and (Test-Path -LiteralPath $CurrentBinary -PathType Leaf)) {
+        $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+        $backupPath = Join-Path $InstallDirectory "$AppName.exe.backup.$timestamp"
+        Write-Host "Backing up the current executable: $backupPath"
+        Copy-Item -LiteralPath $CurrentBinary -Destination $backupPath -Force
+    }
+
+    if ($taskRegistered) {
+        Write-Host 'Stopping the gateway...'
+        Stop-Gateway
+    }
+
+    if ($rotateGatewayLog) {
+        Write-Host 'Rotating gateway.log...'
+        Rotate-Log -Path $gatewayLog
+    }
+
+    if ($rotateGatewayErrorLog) {
+        Write-Host 'Rotating gateway-error.log...'
+        Rotate-Log -Path $gatewayErrorLog
+    }
+
+    if ($updateRequired) {
+        Write-Host 'Installing the latest executable...'
+        $stagedPath = "$CurrentBinary.new"
+        Copy-Item -LiteralPath $downloadPath -Destination $stagedPath -Force
+
+        if ((Get-Sha256 -Path $stagedPath) -ne $expectedSha) {
+            Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+            throw 'The staged executable checksum is incorrect.'
+        }
+
+        if (Test-Path -LiteralPath $CurrentBinary -PathType Leaf) {
+            [IO.File]::Replace($stagedPath, $CurrentBinary, $null, $true)
+        }
+        else {
+            Move-Item -LiteralPath $stagedPath -Destination $CurrentBinary -Force
+        }
+
+        if ($null -ne $existingAcl) {
+            Set-Acl -LiteralPath $CurrentBinary -AclObject $existingAcl
+        }
+    }
+
+    if ($taskRegistered) {
+        Write-Host 'Starting the gateway...'
+        Start-Gateway
+
+        if (-not (Wait-ForAdminApi)) {
+            Write-Warning 'The gateway failed its post-update health check.'
+            Stop-Gateway
+
+            if ($backupPath -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+                Write-Warning 'Rolling back to the previous executable.'
+                Copy-Item -LiteralPath $backupPath -Destination $CurrentBinary -Force
+
+                if ($null -ne $existingAcl) {
+                    Set-Acl -LiteralPath $CurrentBinary -AclObject $existingAcl
+                }
+            }
+            else {
+                Remove-Item -LiteralPath $CurrentBinary -Force -ErrorAction SilentlyContinue
+            }
+
+            Start-Gateway
+            [void](Wait-ForAdminApi)
+            throw 'The update was rolled back because the Admin API did not become ready.'
+        }
+    }
+
+    if ($updateRequired) {
+        Write-Host 'Update complete.'
+    }
+    else {
+        Write-Host 'Log maintenance complete; the executable was unchanged.'
+    }
+
+    if (-not $taskRegistered) {
+        Write-Host 'The gateway task was not registered, so it was not started.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $tempDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $LockDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}

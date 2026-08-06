@@ -127,6 +127,7 @@ Do **not** copy only the application binary. The complete deployment directory i
 
 - The application binary
 - The standard and development installers
+- The uninstaller
 - The systemd service files
 - The updater service and timer
 - The update script
@@ -147,6 +148,7 @@ The resulting directory should look similar to:
 ├── fbs-interlock-gateway
 ├── install.sh
 ├── install-dev.sh
+├── uninstall.sh
 ├── update.sh
 ├── config.yaml
 ├── tls/
@@ -164,7 +166,7 @@ Choose either the standard installation or the development installation.
 
 ```bash
 cd ~/Downloads/linux
-chmod +x install.sh update.sh fbs-interlock-gateway
+chmod +x install.sh uninstall.sh update.sh fbs-interlock-gateway
 sudo ./install.sh
 ```
 
@@ -172,7 +174,7 @@ sudo ./install.sh
 
 ```bash
 cd ~/Downloads/linux
-chmod +x install-dev.sh update.sh fbs-interlock-gateway
+chmod +x install-dev.sh uninstall.sh update.sh fbs-interlock-gateway
 sudo ./install-dev.sh
 ```
 
@@ -183,6 +185,7 @@ The installer performs the following actions:
 | Component | Installed location or action |
 |---|---|
 | Application binary | `/opt/fbs-interlock-gateway/fbs-interlock-gateway` |
+| Uninstaller | `/opt/fbs-interlock-gateway/uninstall.sh` |
 | Configuration file | `/etc/fbs-interlock-gateway/config.yaml` |
 | Gateway TLS files | `/etc/fbs-interlock-gateway/tls/` |
 | Service account | Creates the gateway service account when required |
@@ -296,3 +299,51 @@ On the gateway machine, open the following address in a web browser:
 <http://127.0.0.1:18090>
 
 The admin panel is bound to the local loopback interface and is therefore accessible only from the gateway machine.
+
+## Uninstall the Gateway
+
+The installed uninstaller removes the gateway executable, updater, systemd units, and the gateway-specific UFW rule. It does not disable UFW or reverse system-wide default firewall policies.
+
+### Standard Uninstall
+
+Run:
+
+```bash
+sudo /opt/fbs-interlock-gateway/uninstall.sh
+```
+
+The standard uninstall preserves:
+
+```text
+/etc/fbs-interlock-gateway/config.yaml
+/etc/fbs-interlock-gateway/tls/
+```
+
+It also preserves the `fbs-gateway` service account and group so that a later reinstallation can reuse them safely.
+
+### Purge Configuration and TLS Files
+
+To remove the installed configuration and gateway TLS files as well, run:
+
+```bash
+sudo /opt/fbs-interlock-gateway/uninstall.sh --purge
+```
+
+The `--purge` option removes the complete directory:
+
+```text
+/etc/fbs-interlock-gateway/
+```
+
+The service account and group are still preserved. Existing gateway entries in `journald` are not explicitly deleted; they remain subject to the machine's normal journal retention policy.
+
+### Run the Deployment-Copy Uninstaller
+
+The deployment directory also contains `uninstall.sh`, so it can be used if the installed copy is unavailable:
+
+```bash
+cd ~/Downloads/linux
+sudo ./uninstall.sh
+```
+
+Add `--purge` to that command when the configuration and TLS files must also be removed.
