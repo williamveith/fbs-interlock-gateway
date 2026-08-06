@@ -664,11 +664,9 @@ curl \
 
 # View the Admin Panel
 
-Open a browser on the gateway Mac:
+On the gateway machine, open the following address in a web browser:
 
-```text
-http://127.0.0.1:18090
-```
+<http://127.0.0.1:18090>
 
 The Admin UI provides:
 

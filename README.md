@@ -12,6 +12,7 @@ The project is intended for controlled facility deployments where FBS communicat
 - [Safety and security model](#safety-and-security-model)
   - [Platform firewall behavior](#platform-firewall-behavior)
 - [System architecture](#system-architecture)
+- [Interlock hardware](#interlock-hardware)
 - [Repository layout](#repository-layout)
 - [FBS-facing behavior](#fbs-facing-behavior)
   - [Endpoints](#endpoints)
@@ -78,6 +79,7 @@ The project is intended for controlled facility deployments where FBS communicat
 - optional Shelly HTTP Digest Authentication with reusable per-device digest sessions
 - optional mutual TLS with Shelly server verification and gateway client authentication
 - certificate-generation helpers for the private CAs, gateway identity, and per-device Shelly identities
+- version-controlled Shelly interlock wiring diagrams, junction-box label artwork, hardware build documentation, and QR-encoded device identity records for rapid auditing
 - shared HTTP connection reuse, TLS session caching, and per-device RPC serialization
 - FBS-priority device scheduling that defers or cancels lower-priority Admin probes
 - transient status retry and controlled recovery for persistent Shelly HTTP `423` and `429` responses
@@ -177,6 +179,24 @@ Review them before building a production deployment. Keep the Admin UI on `127.0
 
 Normal FBS traffic updates only the affected tool row in the shared status store. The browser reads that in-memory snapshot every three seconds without contacting any Shelly. The **Refresh Status** action explicitly runs a fleet-wide `Switch.GetStatus` scan with up to 32 workers and publishes each completed result immediately. FBS requests have priority over Admin probes for the same device.
 
+## Interlock hardware
+
+The software is designed to operate with custom Shelly-based interlock junction boxes. Version-controlled hardware documentation is maintained under [`docs/hardware/`](docs/hardware/README.md).
+
+The hardware documentation includes:
+
+- a wiring configuration powered from an external 12 VDC supply
+- a wiring configuration powered from the tool's 110–240 VAC supply
+- junction-box label artwork for both power configurations
+- a general materials list for building the interlock boxes
+- the recorded 30 W fiber-laser settings used to mark the box lids
+- QR-code label data encoded as serialized JSON containing the Shelly device name, model number, and unique device ID
+- a phone-based audit workflow for rapidly collecting and verifying installed-device identity information
+
+Each junction-box QR code records the installed Shelly identity in a compact JSON object, such as `{"device":"Shelly 1 Gen4","model":"S4SW-001X16EU","id":"A085E3B5325C"}`. Scanning the label with a phone provides a fast, auditable record of the device type, model, and unique Shelly ID.
+
+The diagrams document the associated interlock hardware but do not replace qualified electrical review, applicable codes, equipment ratings, or facility safety requirements.
+
 ## Repository layout
 
 ```text
@@ -227,9 +247,12 @@ services/macos/
   production/development installers, startup wrapper, gateway and update
   LaunchDaemon property lists, Packet Filter anchor, updater, and uninstaller
 
-deployment guides/
-  platform-specific Markdown installation and operations guides rendered to PDF
-  during deployment builds
+docs/
+  deployment guides/
+    platform-specific Markdown installation and operations guides rendered to PDF
+    during deployment builds
+  hardware/
+    Shelly interlock wiring diagrams, junction-box label artwork, and build notes
 
 .github/workflows/
   CI and guarded release automation
@@ -876,7 +899,7 @@ The staged private key is created with mode `0600`; the certificates use `0644`.
 
 ### Deployment-guide PDF requirements
 
-Deployment builds render every matching Markdown guide from `deployment guides/` into a PDF in the corresponding platform build directory.
+Deployment builds render every matching Markdown guide from `docs/deployment guides/` into a PDF in the corresponding platform build directory.
 
 Default guide patterns:
 
@@ -1266,9 +1289,9 @@ Standard uninstall removes executables, LaunchDaemons, updater, Packet Filter an
 Detailed procedures are maintained in:
 
 ```text
-deployment guides/Linux Install Instructions.md
-deployment guides/Windows Install Instructions.md
-deployment guides/macOS Install Instructions.md
+docs/deployment guides/Linux Install Instructions.md
+docs/deployment guides/Windows Install Instructions.md
+docs/deployment guides/macOS Install Instructions.md
 ```
 
 Deployment packages contain rendered PDF copies of the matching guides.

@@ -39,7 +39,7 @@ SERVICE_GROUP ?= $(SERVICE_USER)
 FBS_SOURCE_IP=146.6.76.61
 FBS_PORT_RANGE=8081:8981
 
-DEPLOYMENT_GUIDES_DIR := deployment guides
+DEPLOYMENT_GUIDES_DIR := docs/deployment guides
 
 # Every Markdown guide matching the platform pattern is rendered to PDF and
 # placed in that platform's build directory. Override a pattern at invocation
