@@ -67,6 +67,8 @@ INSTALL_OUT := $(LINUX_DIR)/install.sh
 
 INSTALL_DEV_TEMPLATE := $(SERVICE_DIR_LINUX)/install-linux-dev.sh.in
 INSTALL_DEV_OUT := $(LINUX_DIR)/install-dev.sh
+UNINSTALL_TEMPLATE := $(SERVICE_DIR_LINUX)/uninstall-linux.sh.in
+UNINSTALL_OUT := $(LINUX_DIR)/uninstall.sh
 
 UPDATE_TEMPLATE := $(SERVICE_DIR_LINUX)/update-linux.sh.in
 UPDATE_OUT := $(LINUX_DIR)/update.sh
@@ -301,6 +303,21 @@ $(INSTALL_DEV_OUT): $(INSTALL_DEV_TEMPLATE) Makefile
 		-e 's|@FBS_SOURCE_IP@|$(FBS_SOURCE_IP)|g' \
 		-e 's|@FBS_PORT_RANGE@|$(FBS_PORT_RANGE)|g' \
 		"$(INSTALL_DEV_TEMPLATE)" > "$@"
+	chmod +x "$@"
+
+$(UNINSTALL_OUT): $(UNINSTALL_TEMPLATE) Makefile
+	mkdir -p "$(LINUX_DIR)"
+	sed \
+		-e 's|@APP@|$(APP)|g' \
+		-e 's|@INSTALL_DIR@|$(INSTALL_DIR)|g' \
+		-e 's|@CONFIG_DIR@|$(CONFIG_DIR)|g' \
+		-e 's|@CONFIG_PATH@|$(CONFIG_PATH)|g' \
+		-e 's|@TLS_DIR@|$(TLS_DIR)|g' \
+		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
+		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
+		-e 's|@FBS_SOURCE_IP@|$(FBS_SOURCE_IP)|g' \
+		-e 's|@FBS_PORT_RANGE@|$(FBS_PORT_RANGE)|g' \
+		"$(UNINSTALL_TEMPLATE)" > "$@"
 	chmod +x "$@"
 
 $(UPDATE_OUT): $(UPDATE_TEMPLATE) Makefile
@@ -663,7 +680,7 @@ build-darwin-amd64: fmt check-runtime-tls macos-amd64-deployment-guides $(MACOS_
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
@@ -673,7 +690,7 @@ build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
@@ -782,6 +799,7 @@ scripts-check:
 	bash -n \
 		"$(INSTALL_TEMPLATE)" \
 		"$(INSTALL_DEV_TEMPLATE)" \
+		"$(UNINSTALL_TEMPLATE)" \
 		"$(UPDATE_TEMPLATE)" \
 		"$(MACOS_INSTALL_TEMPLATE)" \
 		"$(MACOS_INSTALL_DEV_TEMPLATE)" \
@@ -789,18 +807,11 @@ scripts-check:
 		"$(MACOS_UNINSTALL_TEMPLATE)" \
 		"$(MACOS_UPDATE_TEMPLATE)"
 	@if command -v pwsh >/dev/null 2>&1; then \
-		pwsh -NoLogo -NoProfile -Command '\
-			$$failed = $$false; \
-			foreach ($$path in @("$(WINDOWS_INSTALL_PS1_TEMPLATE)", "$(WINDOWS_UPDATE_PS1_TEMPLATE)", "$(WINDOWS_UNINSTALL_PS1_TEMPLATE)")) { \
-				$$tokens = $$null; $$errors = $$null; \
-				[void][System.Management.Automation.Language.Parser]::ParseFile($$path, [ref]$$tokens, [ref]$$errors); \
-				if ($$errors.Count -gt 0) { $$errors | ForEach-Object { Write-Error "$${path}: $$($_.Message)" }; $$failed = $$true } \
-			}; \
-			if ($$failed) { exit 1 }'; \
+		pwsh -NoLogo -NoProfile -Command '$$failed = $$false; foreach ($$path in @("$(WINDOWS_INSTALL_PS1_TEMPLATE)", "$(WINDOWS_UPDATE_PS1_TEMPLATE)", "$(WINDOWS_UNINSTALL_PS1_TEMPLATE)")) { $$tokens = $$null; $$errors = $$null; [void][System.Management.Automation.Language.Parser]::ParseFile($$path, [ref]$$tokens, [ref]$$errors); foreach ($$parseError in $$errors) { Write-Error ($$path + ": " + $$parseError.Message); $$failed = $$true } }; if ($$failed) { exit 1 }'; \
 	else \
-		echo "Skipping PowerShell parser validation: pwsh unavailable."; \
+		echo "Skipping PowerShell syntax validation: pwsh unavailable."; \
 	fi
-	@python3 -c 'import pathlib, re, sys; paths = [pathlib.Path(p) for p in ("$(WINDOWS_INSTALL_PS1_TEMPLATE)", "$(WINDOWS_UPDATE_PS1_TEMPLATE)", "$(WINDOWS_UNINSTALL_PS1_TEMPLATE)")]; pattern = re.compile(r"\$(?!(?:env|global|script|local|private|using):)([A-Za-z_][A-Za-z0-9_]*):"); failures = [(str(path), index, line.rstrip()) for path in paths for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1) if pattern.search(line)]; [print(f"{path}:{index}: ambiguous PowerShell variable interpolation before colon: {line}", file=sys.stderr) for path, index, line in failures]; sys.exit(1 if failures else 0)'
+	python3 -c 'import pathlib, re, sys; paths = [pathlib.Path(p) for p in ("services/windows/install.ps1.in", "services/windows/update.ps1.in", "services/windows/uninstall.ps1.in")]; pattern = re.compile(r"\$$[A-Za-z_][A-Za-z0-9_]*:(?![A-Za-z_][A-Za-z0-9_]*)"); failures = [(str(path), index, line.rstrip()) for path in paths for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1) if pattern.search(line)]; [print(f"{path}:{index}: ambiguous PowerShell variable interpolation before colon: {line}", file=sys.stderr) for path, index, line in failures]; sys.exit(1 if failures else 0)'
 	@if command -v plutil >/dev/null 2>&1; then \
 		plutil -lint "$(MACOS_PLIST_TEMPLATE)"; \
 		plutil -lint "$(MACOS_UPDATE_PLIST_TEMPLATE)"; \
