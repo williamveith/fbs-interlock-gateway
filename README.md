@@ -78,6 +78,7 @@ lang: en-US
   - [Configuration Reload Behavior](#configuration-reload-behavior)
 - [Logging](#logging)
 - [Repository Safety](#repository-safety)
+- [License](#License)
 
 <div class="page-break"></div>
 
@@ -1762,3 +1763,14 @@ config.yaml.bak
 `pki/` contains CA private keys, gateway certificate requests, and per-device Shelly keys. `/tls/` contains the staged gateway runtime trust and identity files. `build/` contains generated binaries, scripts, service definitions, TLS copies, and deployment-guide PDFs. Patch files are also ignored so local review or transfer patches are not committed accidentally.
 
 Committed content includes source code, tests, certificate templates and generation helpers, service templates, workflows, Markdown deployment guides, and documentation. Production configuration, credentials, generated certificates, private keys, generated PDFs, and installed-state artifacts remain on controlled development or deployment machines.
+
+# License
+
+This project is available under the
+[FBS Interlock Gateway Public Benefit Source License 1.0](LICENSE.md).
+
+Eligible individuals and organizations may use the project without charge.
+Current and former employers of the Licensor require a separate written
+license.
+
+See [Commercial and Employer Licensing](COMMERCIAL-LICENSING.md) for details.
