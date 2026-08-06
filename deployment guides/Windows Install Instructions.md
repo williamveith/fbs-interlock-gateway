@@ -950,7 +950,7 @@ A purge also removes the configuration, TLS files, and logs.
 Open an elevated Command Prompt in the deployment directory:
 
 ```bat
-uninstall.bat --purge
+./uninstall.bat --purge
 ```
 
 Equivalent PowerShell command:

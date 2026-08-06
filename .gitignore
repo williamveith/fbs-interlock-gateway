@@ -4,3 +4,4 @@ build
 pki
 config.yaml
 config.yaml.bak
+*.patch
