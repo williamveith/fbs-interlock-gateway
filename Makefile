@@ -37,9 +37,21 @@ FBS_SOURCE_IP=146.6.76.61
 FBS_PORT_RANGE=8081:8981
 
 DEPLOYMENT_GUIDES_DIR := deployment guides
-LINUX_INSTALL_GUIDE := Linux Install Instructions.md
-WINDOWS_INSTALL_GUIDE := Windows Install Instructions.md
-MACOS_INSTALL_GUIDE := macOS Install Instructions.md
+
+# Every Markdown guide matching the platform pattern is rendered to PDF and
+# placed in that platform's build directory. Override a pattern at invocation
+# time when needed, for example:
+#   make build-linux-amd64 LINUX_DEPLOYMENT_GUIDE_PATTERN='*.md'
+LINUX_DEPLOYMENT_GUIDE_PATTERN ?= Linux*.md
+WINDOWS_DEPLOYMENT_GUIDE_PATTERN ?= Windows*.md
+MACOS_DEPLOYMENT_GUIDE_PATTERN ?= macOS*.md
+
+PANDOC ?= pandoc
+PDF_ENGINE ?= xelatex
+PDF_MARGIN ?= 0.5in
+PDF_FONT_SIZE ?= 12pt
+PDF_MAIN_FONT ?= IBMPlexMono-Regular
+PDF_MONO_FONT ?= IBMPlexMono-Regular
 
 # =========================
 # LINUX SERVICE CONFIGS
@@ -168,6 +180,10 @@ endif
 	build-linux-amd64 \
 	build-windows-amd64 \
 	check-runtime-tls \
+	linux-deployment-guides \
+	windows-deployment-guides \
+	macos-arm64-deployment-guides \
+	macos-amd64-deployment-guides \
 	windows-deployment-files \
 	macos-arm64-deployment-files \
 	macos-amd64-deployment-files \
@@ -366,6 +382,66 @@ macos-deployment-files: \
 	macos-amd64-deployment-files
 
 # =========================
+# DEPLOYMENT GUIDE PDFS
+# =========================
+
+# Render every Markdown guide matching $(2) into $(1). The find/sh approach is
+# intentional: the source directory and guide filenames contain spaces, which
+# are not safe to enumerate with Make's wildcard/patsubst functions.
+define build_deployment_guides
+set -eu; \
+command -v "$(PANDOC)" >/dev/null 2>&1 || { \
+	echo "ERROR: $(PANDOC) is required to build deployment guide PDFs."; \
+	exit 1; \
+}; \
+command -v "$(PDF_ENGINE)" >/dev/null 2>&1 || { \
+	echo "ERROR: $(PDF_ENGINE) is required to build deployment guide PDFs."; \
+	exit 1; \
+}; \
+mkdir -p "$(1)"; \
+if ! find "$(DEPLOYMENT_GUIDES_DIR)" -maxdepth 1 -type f -name '$(2)' \
+	-print -quit | grep -q .; then \
+	echo "ERROR: No deployment guides matched $(DEPLOYMENT_GUIDES_DIR)/$(2)"; \
+	exit 1; \
+fi; \
+find "$(DEPLOYMENT_GUIDES_DIR)" -maxdepth 1 -type f -name '$(2)' \
+	-exec sh -c '\
+		out_dir=$$1; \
+		shift; \
+		for guide in "$$@"; do \
+			pdf_name=$$(basename "$$guide" .md).pdf; \
+			echo "Rendering $$guide -> $$out_dir/$$pdf_name"; \
+			"$(PANDOC)" "$$guide" \
+				-o "$$out_dir/$$pdf_name" \
+				--pdf-engine="$(PDF_ENGINE)" \
+				-V geometry:margin="$(PDF_MARGIN)" \
+				-V fontsize="$(PDF_FONT_SIZE)" \
+				-V mainfont="$(PDF_MAIN_FONT)" \
+				-V monofont="$(PDF_MONO_FONT)" \
+				-V colorlinks=true \
+				-V linkcolor=blue \
+				-V urlcolor=blue \
+				-V "header-includes=\setlength{\parindent}{0pt}" \
+				-V "header-includes=\setlength{\parskip}{0.6em}" \
+				-V "header-includes=\setlength{\emergencystretch}{3em}" \
+				-V "header-includes=\raggedbottom"; \
+		done \
+	' sh "$(1)" {} +
+endef
+
+linux-deployment-guides:
+	@$(call build_deployment_guides,$(LINUX_DIR),$(LINUX_DEPLOYMENT_GUIDE_PATTERN))
+
+windows-deployment-guides:
+	@$(call build_deployment_guides,$(WINDOWS_DIR),$(WINDOWS_DEPLOYMENT_GUIDE_PATTERN))
+
+macos-arm64-deployment-guides:
+	@$(call build_deployment_guides,$(MAC_ARM64_DIR),$(MACOS_DEPLOYMENT_GUIDE_PATTERN))
+
+macos-amd64-deployment-guides:
+	@$(call build_deployment_guides,$(MAC_AMD64_DIR),$(MACOS_DEPLOYMENT_GUIDE_PATTERN))
+
+# =========================
 # CONFIGURATION
 # =========================
 
@@ -426,30 +502,27 @@ define copy_linux_tls
 endef
 
 
-build-darwin-arm64: fmt $(MACOS_ARM64_DEPLOYMENT_FILES)
+build-darwin-arm64: fmt macos-arm64-deployment-guides $(MACOS_ARM64_DEPLOYMENT_FILES)
 	mkdir -p "$(MAC_ARM64_DIR)"
 	cp "$(CONFIGS)" "$(MAC_ARM64_DIR)/"
-	cp "$(DEPLOYMENT_GUIDES_DIR)/$(MACOS_INSTALL_GUIDE)" "$(MAC_ARM64_DIR)/"
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(MAC_ARM64_DIR)/$(APP)" \
 		$(CMD)
 
-build-darwin-amd64: fmt $(MACOS_AMD64_DEPLOYMENT_FILES)
+build-darwin-amd64: fmt macos-amd64-deployment-guides $(MACOS_AMD64_DEPLOYMENT_FILES)
 	mkdir -p "$(MAC_AMD64_DIR)"
 	cp "$(CONFIGS)" "$(MAC_AMD64_DIR)/"
-	cp "$(DEPLOYMENT_GUIDES_DIR)/$(MACOS_INSTALL_GUIDE)" "$(MAC_AMD64_DIR)/"
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-arm64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
-	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		-trimpath \
@@ -457,10 +530,9 @@ build-linux-arm64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-amd64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
-	cp "$(DEPLOYMENT_GUIDES_DIR)/$(LINUX_INSTALL_GUIDE)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		-trimpath \
@@ -468,10 +540,9 @@ build-linux-amd64: fmt check-runtime-tls $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-windows-amd64: fmt $(WINDOWS_DEPLOYMENT_FILES)
+build-windows-amd64: fmt windows-deployment-guides $(WINDOWS_DEPLOYMENT_FILES)
 	mkdir -p "$(WINDOWS_DIR)"
 	cp "$(CONFIGS)" "$(WINDOWS_DIR)/"
-	cp "$(DEPLOYMENT_GUIDES_DIR)/$(WINDOWS_INSTALL_GUIDE)" "$(WINDOWS_DIR)/"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
 		-trimpath \
 		-ldflags="$(LDFLAGS)" \

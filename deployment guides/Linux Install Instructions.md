@@ -1,68 +1,65 @@
-# Linux Installation Instructions
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+\vspace*{\fill}
 
-## Table of Contents
+{\Huge\bfseries FBS Interlock Gateway\par}
+\vspace{1em}
+{\LARGE Linux Installation Instructions\par}
 
-- [Set Up the Gateway Machine](#set-up-the-gateway-machine)
-  - [Install the Operating System](#install-the-operating-system)
-  - [Create the User Account](#create-the-user-account)
+\vspace*{\fill}
+\end{titlepage}
 
-- [Deploy the Software](#deploy-the-software)
-  - [Prepare the Gateway TLS Files](#prepare-the-gateway-tls-files)
-- [Build the Deployment Assets](#build-the-deployment-assets)
-  - [Copy the Deployment Directory to a USB Drive](#copy-the-deployment-directory-to-a-usb-drive)
-  - [Copy the Deployment Directory to the Gateway Machine](#copy-the-deployment-directory-to-the-gateway-machine)
-  - [Install the Gateway](#install-the-gateway)
-  - [What the Installer Does](#what-the-installer-does)
-  - [Verify the Installed TLS Files](#verify-the-installed-tls-files)
-  - [Check the Service Status](#check-the-service-status)
-  - [View Live Logs](#view-live-logs)
-  - [Restart the Service Manually](#restart-the-service-manually)
-  - [View the Admin Panel](#view-the-admin-panel)
+\pagenumbering{roman}
+\renewcommand{\contentsname}{Table of Contents}
+\setcounter{tocdepth}{2}
+\tableofcontents
+\clearpage
 
----
+\pagenumbering{arabic}
 
 # Set Up the Gateway Machine
 
 ## Install the Operating System
 
-Install **Debian GNU/Linux 12 (Bookworm)** with **GNOME 43.9**:
-
-https://www.debian.org/releases/bookworm/debian-installer/
+Install [**Debian GNU/Linux 12 (Bookworm)** with **GNOME 43.9**](https://www.debian.org/releases/bookworm/debian-installer/).
 
 ## Create the User Account
 
-Create the user **`fbs-gateway`** during installation and add it to the `sudo` group.
+During installation, create the user account:
 
-Open a root shell using PolicyKit:
+```text
+fbs-gateway
+```
+
+After installation, open a root shell using PolicyKit and add `fbs-gateway` to the `sudo` group:
 
 ```bash
 pkexec bash
+usermod -aG sudo fbs-gateway
+exit
 ```
 
-Add `fbs-gateway` to the `sudo` group:
+Reboot the gateway machine:
 
 ```bash
-usermod -aG sudo fbs-gateway
+sudo reboot
 ```
 
-Reboot the machine.
-
----
+\newpage
 
 # Deploy the Software
 
-
 ## Prepare the Gateway TLS Files
 
-Before building the Linux deployment directory, generate the certificate
-authorities and gateway client identity:
+Before building the Linux deployment directory, generate the certificate authorities and gateway client identity:
 
 ```bash
 make ca
 make gateway-cert
 ```
 
-The gateway certificate command populates the repository runtime directory:
+The gateway certificate command populates the repository's runtime TLS directory:
 
 ```text
 tls/
@@ -71,11 +68,19 @@ tls/
 └── gateway-client.key
 ```
 
-Only these three runtime files are packaged for the Linux gateway. The complete
-`pki/` directory, CA private keys, Shelly certificates, CSRs, and
-`client-ca.crt` are not copied to the gateway.
+Only these three runtime files are packaged for the Linux gateway.
 
-The installed configuration uses:
+The following files are **not** copied to the gateway:
+
+- The complete `pki/` directory
+- CA private keys
+- Shelly private keys and certificates
+- Certificate signing requests
+- `client-ca.crt`
+
+> **Security note:** `gateway-client.key` is a private key. Keep the development machine, deployment directory, and USB drive secure. Remove temporary copies after installation when they are no longer needed.
+
+The installed configuration uses the following relative paths:
 
 ```yaml
 defaults:
@@ -85,8 +90,13 @@ defaults:
     client_key_file: "./tls/gateway-client.key"
 ```
 
-The systemd service runs with `/etc/fbs-interlock-gateway` as its working
-directory, so these relative paths point to:
+The systemd service uses the following working directory:
+
+```text
+/etc/fbs-interlock-gateway
+```
+
+Therefore, the relative TLS paths resolve to:
 
 ```text
 /etc/fbs-interlock-gateway/tls/
@@ -113,21 +123,22 @@ The build fails if any required runtime TLS file is missing.
 
 Copy the entire `build/linux/` directory to a USB flash drive.
 
-Do **not** copy only the application binary. The complete directory is required because it contains:
+Do **not** copy only the application binary. The complete deployment directory is required because it contains:
 
 - The application binary
-- The installer
+- The standard and development installers
 - The systemd service files
-- The updater and update timer files
+- The updater service and timer
+- The update script
 - The configuration file
 - The gateway runtime TLS directory
-- These deployment instructions
+- These installation instructions
 
 ## Copy the Deployment Directory to the Gateway Machine
 
 Insert the USB flash drive into the gateway machine.
 
-Copy the `linux` directory from the USB flash drive into the current user's `Downloads` directory.
+Copy the `linux` directory from the USB drive into the current user's `Downloads` directory.
 
 The resulting directory should look similar to:
 
@@ -135,9 +146,10 @@ The resulting directory should look similar to:
 ~/Downloads/linux/
 ├── fbs-interlock-gateway
 ├── install.sh
+├── install-dev.sh
 ├── update.sh
 ├── config.yaml
-├── tls
+├── tls/
 │   ├── server-ca.crt
 │   ├── gateway-client.crt
 │   └── gateway-client.key
@@ -146,7 +158,9 @@ The resulting directory should look similar to:
 
 ## Install the Gateway
 
-Move to the deployment directory, make the deployment files executable, and run the installer:
+Choose either the standard installation or the development installation.
+
+### Standard Installation
 
 ```bash
 cd ~/Downloads/linux
@@ -154,7 +168,7 @@ chmod +x install.sh update.sh fbs-interlock-gateway
 sudo ./install.sh
 ```
 
-To install the dev version do:
+### Development Installation
 
 ```bash
 cd ~/Downloads/linux
@@ -166,34 +180,25 @@ sudo ./install-dev.sh
 
 The installer performs the following actions:
 
-- Installs the application binary in:
-  ```
-  /opt/fbs-interlock-gateway/
-  ```
+| Component | Installed location or action |
+|---|---|
+| Application binary | `/opt/fbs-interlock-gateway/fbs-interlock-gateway` |
+| Configuration file | `/etc/fbs-interlock-gateway/config.yaml` |
+| Gateway TLS files | `/etc/fbs-interlock-gateway/tls/` |
+| Service account | Creates the gateway service account when required |
+| Gateway service | Installs, enables, and starts the systemd service |
+| Automatic updater | Installs the updater service and timer when their files are present |
 
-- Installs the configuration file at:
-  ```
-  /etc/fbs-interlock-gateway/config.yaml
-  ```
+During reinstallation:
 
-- Installs the gateway runtime TLS files at:
-  ```
-  /etc/fbs-interlock-gateway/tls/
-  ```
-
-- Creates the gateway service account when needed
-- Installs the systemd service
-- Enables and starts the gateway service
-- Installs the updater and update timer when their files are present
-
-An existing production configuration file is preserved during reinstallation.
-Existing gateway TLS files are also preserved. The hourly updater replaces only
-the application binary and does not modify the configuration or TLS files.
-
+- An existing production configuration file is preserved.
+- Existing gateway TLS files are preserved.
+- The hourly updater replaces only the application binary.
+- The updater does not modify the configuration file or TLS files.
 
 ## Verify the Installed TLS Files
 
-Confirm that all three files are installed:
+Confirm that the TLS directory contains all three required files:
 
 ```bash
 sudo ls -l /etc/fbs-interlock-gateway/tls
@@ -207,58 +212,87 @@ gateway-client.crt
 gateway-client.key
 ```
 
-Confirm that the service account can read them:
+Confirm that the `fbs-gateway` service account can read each file:
 
 ```bash
-sudo -u fbs-gateway test \
-  -r /etc/fbs-interlock-gateway/tls/server-ca.crt
-
-sudo -u fbs-gateway test \
-  -r /etc/fbs-interlock-gateway/tls/gateway-client.crt
-
-sudo -u fbs-gateway test \
-  -r /etc/fbs-interlock-gateway/tls/gateway-client.key
+sudo -u fbs-gateway test -r /etc/fbs-interlock-gateway/tls/server-ca.crt &&
+sudo -u fbs-gateway test -r /etc/fbs-interlock-gateway/tls/gateway-client.crt &&
+sudo -u fbs-gateway test -r /etc/fbs-interlock-gateway/tls/gateway-client.key &&
+echo "All gateway TLS files are readable."
 ```
 
-Each command should exit without printing an error.
+If all files are readable, the command prints:
+
+```text
+All gateway TLS files are readable.
+```
 
 ## Check the Service Status
 
-Verify that the service is running:
+### View the Complete Service Status
 
 ```bash
-sudo systemctl status fbs-interlock-gateway.service --no-pager --full
+sudo systemctl status fbs-interlock-gateway.service \
+  --no-pager \
+  --full
 ```
 
-Verify that systemd reports the service as active:
+### Confirm That the Service Is Active
 
 ```bash
 sudo systemctl is-active fbs-interlock-gateway.service
 ```
 
-## View Live Logs
+Expected result:
 
-To follow the gateway service logs:
+```text
+active
+```
+
+### Confirm That the Service Is Enabled
 
 ```bash
-sudo journalctl -u fbs-interlock-gateway.service -f
+sudo systemctl is-enabled fbs-interlock-gateway.service
+```
+
+Expected result:
+
+```text
+enabled
+```
+
+## View Live Logs
+
+Follow the gateway service logs:
+
+```bash
+sudo journalctl \
+  -u fbs-interlock-gateway.service \
+  -f
 ```
 
 Press **Ctrl+C** to stop following the logs.
 
 ## Restart the Service Manually
 
-After manually editing the configuration file, restart the service and verify that it restarted successfully:
+After manually editing the configuration file, restart the service:
 
 ```bash
 sudo systemctl restart fbs-interlock-gateway.service
-sudo systemctl status fbs-interlock-gateway.service --no-pager --full
+```
+
+Verify that the service restarted successfully:
+
+```bash
+sudo systemctl status fbs-interlock-gateway.service \
+  --no-pager \
+  --full
 ```
 
 ## View the Admin Panel
 
-The admin panel is available at:
+On the gateway machine, open the following address in a web browser:
 
-```
-http://127.0.0.1:18090
-```
+<http://127.0.0.1:18090>
+
+The admin panel is bound to the local loopback interface and is therefore accessible only from the gateway machine.
