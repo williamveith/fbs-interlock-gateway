@@ -38,11 +38,7 @@ non-employer-related purposes and not for the benefit of the Employer Entity.
 
 **“Commercial License”** means a separate written agreement signed by the
 Licensor that expressly authorizes an Employer Entity to use the Covered
-Materials. The Commercial License is documented separately in:
-
-```text
-docs/legal/COMMERCIAL-LICENSING.md
-```
+Materials. The Commercial License is documented separately in: [COMMERCIAL-LICENSING.md](docs/legal/COMMERCIAL-LICENSING.md)
 
 ## 2. Public License Grant
 
