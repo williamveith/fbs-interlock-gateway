@@ -1,0 +1,294 @@
+#!/bin/bash
+set -euo pipefail
+
+APP="@APP@"
+INSTALL_DIR="@MACOS_INSTALL_DIR@"
+LOG_DIR="@MACOS_LOG_DIR@"
+SERVICE_USER="@MACOS_SERVICE_USER@"
+SERVICE_GROUP="@MACOS_SERVICE_GROUP@"
+LAUNCHD_LABEL="@MACOS_LAUNCHD_LABEL@"
+PLIST_PATH="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+ADMIN_STATUS_URL="http://127.0.0.1:18090/api/status"
+
+REPO="williamveith/fbs-interlock-gateway"
+MAX_LOG_BYTES=10485760
+LOG_ARCHIVE_COUNT=30
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "ERROR: This updater must be run on macOS."
+  exit 1
+fi
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "Administrator privileges are required."
+  exec sudo "$0" "$@"
+fi
+
+for command_name in curl shasum file gzip; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "ERROR: Required command not found: ${command_name}"
+    exit 1
+  fi
+done
+
+case "$(uname -m)" in
+  arm64)
+    ARCH="arm64"
+    FILE_ARCH="arm64"
+    ;;
+  x86_64)
+    ARCH="amd64"
+    FILE_ARCH="x86_64"
+    ;;
+  *)
+    echo "ERROR: Unsupported architecture: $(uname -m)"
+    exit 1
+    ;;
+esac
+
+ASSET="${APP}-darwin-${ARCH}"
+BASE_URL="https://github.com/${REPO}/releases/latest/download"
+BIN_URL="${BASE_URL}/${ASSET}"
+SHA_URL="${BASE_URL}/${ASSET}.sha256"
+CURRENT_BIN="${INSTALL_DIR}/${APP}"
+LOCK_DIR="${INSTALL_DIR}/.update-lock"
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "Another update is already running; exiting."
+  exit 0
+fi
+
+TMP_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$TMP_DIR"
+  rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+lowercase() {
+  tr '[:upper:]' '[:lower:]'
+}
+
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}' | lowercase
+}
+
+job_loaded() {
+  launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1
+}
+
+stop_gateway() {
+  if job_loaded; then
+    launchctl bootout system "$PLIST_PATH" >/dev/null 2>&1 ||
+      launchctl bootout "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 ||
+      true
+  fi
+}
+
+start_gateway() {
+  launchctl enable "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+  launchctl bootstrap system "$PLIST_PATH"
+  launchctl kickstart -k "system/${LAUNCHD_LABEL}"
+}
+
+wait_for_admin() {
+  local attempt=0
+
+  while [[ "$attempt" -lt 20 ]]; do
+    if curl \
+      --fail \
+      --silent \
+      --show-error \
+      --max-time 2 \
+      "$ADMIN_STATUS_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+
+  return 1
+}
+
+log_size() {
+  if [[ -f "$1" ]]; then
+    stat -f '%z' "$1"
+  else
+    echo 0
+  fi
+}
+
+log_needs_rotation() {
+  [[ "$(log_size "$1")" -ge "$MAX_LOG_BYTES" ]]
+}
+
+rotate_log() {
+  local path="$1"
+  local index=$((LOG_ARCHIVE_COUNT - 1))
+
+  rm -f "${path}.${LOG_ARCHIVE_COUNT}.gz"
+
+  while [[ "$index" -ge 1 ]]; do
+    if [[ -f "${path}.${index}.gz" ]]; then
+      mv \
+        "${path}.${index}.gz" \
+        "${path}.$((index + 1)).gz"
+    fi
+    index=$((index - 1))
+  done
+
+  if [[ -f "$path" ]]; then
+    mv "$path" "${path}.1"
+    gzip -f "${path}.1"
+    install       -o "$SERVICE_USER"       -g "$SERVICE_GROUP"       -m 0640       /dev/null       "$path"
+  fi
+}
+
+echo "Checking latest release for ${APP}..."
+echo "Architecture: darwin-${ARCH}"
+
+echo "Downloading latest checksum..."
+curl \
+  --fail \
+  --location \
+  --retry 3 \
+  --connect-timeout 10 \
+  --output "${TMP_DIR}/${ASSET}.sha256" \
+  "$SHA_URL"
+
+EXPECTED_SHA="$(
+  awk 'NF >= 1 {print $1; exit}' "${TMP_DIR}/${ASSET}.sha256" |
+    lowercase
+)"
+
+if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: Release checksum file contains an invalid SHA-256 value."
+  exit 1
+fi
+
+UPDATE_REQUIRED=true
+if [[ -f "$CURRENT_BIN" ]]; then
+  CURRENT_SHA="$(sha256_file "$CURRENT_BIN")"
+  echo "Installed checksum: $CURRENT_SHA"
+  echo "Latest checksum:    $EXPECTED_SHA"
+
+  if [[ "$CURRENT_SHA" == "$EXPECTED_SHA" ]]; then
+    UPDATE_REQUIRED=false
+  fi
+fi
+
+ROTATE_STDOUT=false
+ROTATE_STDERR=false
+if log_needs_rotation "$LOG_DIR/gateway.log"; then
+  ROTATE_STDOUT=true
+fi
+if log_needs_rotation "$LOG_DIR/gateway-error.log"; then
+  ROTATE_STDERR=true
+fi
+
+if [[ "$UPDATE_REQUIRED" == false &&
+      "$ROTATE_STDOUT" == false &&
+      "$ROTATE_STDERR" == false ]]; then
+  echo "Already running the latest binary; logs are within limits."
+  exit 0
+fi
+
+WAS_LOADED=false
+if job_loaded; then
+  WAS_LOADED=true
+fi
+
+BACKUP=""
+if [[ "$UPDATE_REQUIRED" == true && -f "$CURRENT_BIN" ]]; then
+  BACKUP="${INSTALL_DIR}/${APP}.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+  echo "Backing up current binary:"
+  echo "  $BACKUP"
+  cp -a "$CURRENT_BIN" "$BACKUP"
+fi
+
+if [[ "$UPDATE_REQUIRED" == true ]]; then
+  echo "Downloading latest binary..."
+  curl \
+    --fail \
+    --location \
+    --retry 3 \
+    --connect-timeout 10 \
+    --output "${TMP_DIR}/${ASSET}" \
+    "$BIN_URL"
+
+  DOWNLOADED_SHA="$(sha256_file "${TMP_DIR}/${ASSET}")"
+  if [[ "$DOWNLOADED_SHA" != "$EXPECTED_SHA" ]]; then
+    echo "ERROR: Downloaded binary checksum does not match."
+    exit 1
+  fi
+
+  BINARY_INFO="$(file -b "${TMP_DIR}/${ASSET}")"
+  if [[ "$BINARY_INFO" != *"Mach-O 64-bit executable ${FILE_ARCH}"* ]]; then
+    echo "ERROR: Downloaded release has the wrong architecture:"
+    echo "  $BINARY_INFO"
+    exit 1
+  fi
+fi
+
+if [[ "$WAS_LOADED" == true ]]; then
+  echo "Stopping the gateway..."
+  stop_gateway
+fi
+
+if [[ "$ROTATE_STDOUT" == true ]]; then
+  echo "Rotating gateway.log..."
+  rotate_log "$LOG_DIR/gateway.log"
+fi
+if [[ "$ROTATE_STDERR" == true ]]; then
+  echo "Rotating gateway-error.log..."
+  rotate_log "$LOG_DIR/gateway-error.log"
+fi
+
+if [[ "$UPDATE_REQUIRED" == true ]]; then
+  echo "Installing latest binary..."
+  install \
+    -o root \
+    -g wheel \
+    -m 0755 \
+    "${TMP_DIR}/${ASSET}" \
+    "${CURRENT_BIN}.new"
+
+  if [[ "$(sha256_file "${CURRENT_BIN}.new")" != "$EXPECTED_SHA" ]]; then
+    echo "ERROR: Staged installed binary checksum is incorrect."
+    rm -f "${CURRENT_BIN}.new"
+    if [[ "$WAS_LOADED" == true ]]; then
+      start_gateway || true
+    fi
+    exit 1
+  fi
+
+  mv -f "${CURRENT_BIN}.new" "$CURRENT_BIN"
+  xattr -d com.apple.quarantine "$CURRENT_BIN" >/dev/null 2>&1 || true
+fi
+
+if [[ "$WAS_LOADED" == true ]]; then
+  echo "Starting the gateway..."
+  if ! start_gateway || ! wait_for_admin; then
+    echo "ERROR: Gateway failed its post-update health check."
+
+    stop_gateway
+
+    if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
+      echo "Rolling back to the previous binary..."
+      install -o root -g wheel -m 0755 "$BACKUP" "$CURRENT_BIN"
+    fi
+
+    start_gateway || true
+    exit 1
+  fi
+fi
+
+if [[ "$UPDATE_REQUIRED" == true ]]; then
+  echo "Update complete."
+else
+  echo "Log maintenance complete; the binary was unchanged."
+fi
+
+if [[ "$WAS_LOADED" == false ]]; then
+  echo "The gateway was not loaded before maintenance and was not started."
+fi

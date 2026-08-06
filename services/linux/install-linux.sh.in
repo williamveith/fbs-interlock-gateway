@@ -27,6 +27,7 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="${SOURCE_DIR}/${APP}"
 CONFIG_SRC="${SOURCE_DIR}/config.yaml"
 SERVICE_SRC="${SOURCE_DIR}/${SERVICE_NAME}"
+UNINSTALL_SRC="${SOURCE_DIR}/uninstall.sh"
 UPDATE_SRC="${SOURCE_DIR}/update.sh"
 
 TLS_SRC="${SOURCE_DIR}/tls"
@@ -200,6 +201,12 @@ if [[ ! -f "$SERVICE_SRC" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$UNINSTALL_SRC" ]]; then
+  echo "ERROR: Missing uninstaller:"
+  echo "  $UNINSTALL_SRC"
+  exit 1
+fi
+
 for tls_source in   "$SERVER_CA_SRC"   "$CLIENT_CERT_SRC"   "$CLIENT_KEY_SRC"
 do
   if [[ ! -f "$tls_source" ]]; then
@@ -242,6 +249,15 @@ install \
   -m 0755 \
   "$BIN_SRC" \
   "$INSTALL_DIR/$APP"
+
+
+echo "Installing uninstall.sh..."
+install \
+  -o root \
+  -g root \
+  -m 0755 \
+  "$UNINSTALL_SRC" \
+  "$INSTALL_DIR/uninstall.sh"
 
 echo "Creating config directory..."
 install -d \
@@ -385,6 +401,7 @@ systemctl restart "$SERVICE_NAME"
 
 echo
 echo "Install complete."
+echo "Uninstaller: ${INSTALL_DIR}/uninstall.sh"
 echo
 
 systemctl --no-pager --full status "$SERVICE_NAME"
