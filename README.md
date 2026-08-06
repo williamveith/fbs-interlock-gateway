@@ -1,34 +1,43 @@
-# FBS Interlock Gateway
+---
+title: "FBS Interlock Gateway"
+subtitle: "Project Overview and Operations Reference"
+author: "William Veith"
+date: "2026-08-06"
+lang: en-US
+---
 
-`fbs-interlock-gateway` is a Go service that lets the FBS interlock system control networked tool interlocks through a local gateway server.
+> **Purpose**
+>
+> This README provides the authoritative project-level overview for `fbs-interlock-gateway`, including system architecture, security boundaries, interlock hardware, configuration, Admin behavior, development, deployment packaging, updates, logging, testing, and release operations.
 
-The gateway receives FBS HTTP interlock requests, maps each request to a configured tool listener, communicates with the assigned Shelly relay or network interlock over HTTP or HTTPS RPC, and returns the simple JSON state response expected by FBS. Shelly communication can use HTTP Digest Authentication, mutual TLS, or both.
+> **Safety and security boundary**
+>
+> The gateway controls software access signals. Hardware interlocks and fail-safe circuitry remain authoritative. Production listener ports must remain restricted to the authorized FBS source, the Admin UI should remain bound to loopback, and generated credentials, certificates, private keys, and production mappings must remain outside version control.
 
-The project is intended for controlled facility deployments where FBS communicates with the gateway and the gateway communicates with configured interlock devices. A shared in-memory status store lets normal FBS traffic passively update the local Admin UI without creating recurring Shelly status traffic.
-
-## Table of Contents
-
+# Table of Contents
+- [Project Overview](#project-overview)
+  - [Documentation Set](#documentation-set)
 - [Capabilities](#capabilities)
-- [Safety and security model](#safety-and-security-model)
-  - [Platform firewall behavior](#platform-firewall-behavior)
-- [System architecture](#system-architecture)
-- [Interlock hardware](#interlock-hardware)
-- [Repository layout](#repository-layout)
-- [FBS-facing behavior](#fbs-facing-behavior)
+- [Safety and Security Model](#safety-and-security-model)
+  - [Platform Firewall Behavior](#platform-firewall-behavior)
+- [System Architecture](#system-architecture)
+- [Interlock Hardware](#interlock-hardware)
+- [Repository Layout](#repository-layout)
+- [FBS-Facing Behavior](#fbs-facing-behavior)
   - [Endpoints](#endpoints)
-- [Gateway-to-Shelly communication](#gateway-to-shelly-communication)
-  - [Connection, authentication, priority, and recovery behavior](#connection-authentication-priority-and-recovery-behavior)
-- [Shelly authentication helper](#shelly-authentication-helper)
-- [Shelly mutual TLS](#shelly-mutual-tls)
-  - [Certificate roles](#certificate-roles)
-  - [Generate the certificate authorities and gateway identity](#generate-the-certificate-authorities-and-gateway-identity)
-  - [Generate a Shelly server certificate](#generate-a-shelly-server-certificate)
+- [Gateway-to-Shelly Communication](#gateway-to-shelly-communication)
+  - [Connection, Authentication, Priority, and Recovery Behavior](#connection-authentication-priority-and-recovery-behavior)
+- [Shelly Authentication Helper](#shelly-authentication-helper)
+- [Shelly Mutual TLS](#shelly-mutual-tls)
+  - [Certificate Roles](#certificate-roles)
+  - [Generate the Certificate Authorities and Gateway Identity](#generate-the-certificate-authorities-and-gateway-identity)
+  - [Generate a Shelly Server Certificate](#generate-a-shelly-server-certificate)
 - [Admin UI](#admin-ui)
-  - [Passive status model](#passive-status-model)
-  - [FBS-priority scheduling](#fbs-priority-scheduling)
-  - [Admin server protections](#admin-server-protections)
-  - [Admin address flag](#admin-address-flag)
-  - [Remote access with an SSH tunnel](#remote-access-with-an-ssh-tunnel)
+  - [Passive Status Model](#passive-status-model)
+  - [FBS-Priority Scheduling](#fbs-priority-scheduling)
+  - [Admin Server Protections](#admin-server-protections)
+  - [Admin Address Flag](#admin-address-flag)
+  - [Remote Access with an SSH Tunnel](#remote-access-with-an-ssh-tunnel)
 - [Admin API](#admin-api)
   - [GET /api/config](#get-apiconfig)
   - [PUT /api/config](#put-apiconfig)
@@ -36,41 +45,73 @@ The project is intended for controlled facility deployments where FBS communicat
   - [GET /api/status?refresh=1](#get-apistatusrefresh1)
   - [POST /api/restart](#post-apirestart)
 - [Configuration](#configuration)
-  - [Config fields](#config-fields)
+  - [Config Fields](#config-fields)
   - [Validation](#validation)
-  - [Configuration ownership](#configuration-ownership)
-- [Development and validation](#development-and-validation)
-- [Building deployment packages](#building-deployment-packages)
-  - [Prepare runtime TLS files](#prepare-runtime-tls-files)
-  - [Deployment-guide PDF requirements](#deployment-guide-pdf-requirements)
+  - [Configuration Ownership](#configuration-ownership)
+- [Development and Validation](#development-and-validation)
+- [Building Deployment Packages](#building-deployment-packages)
+  - [Prepare Runtime TLS Files](#prepare-runtime-tls-files)
+  - [Deployment-Guide PDF Requirements](#deployment-guide-pdf-requirements)
   - [Linux](#linux)
   - [Windows AMD64](#windows-amd64)
   - [macOS Apple Silicon](#macos-apple-silicon)
   - [macOS Intel](#macos-intel)
-  - [Generate template-derived files only](#generate-template-derived-files-only)
-  - [Generate deployment-guide PDFs only](#generate-deployment-guide-pdfs-only)
-- [Deployment build output](#deployment-build-output)
+  - [Generate Template-Derived Files Only](#generate-template-derived-files-only)
+  - [Generate Deployment-Guide PDFs Only](#generate-deployment-guide-pdfs-only)
+- [Deployment Build Output](#deployment-build-output)
   - [Linux](#linux-1)
   - [Windows](#windows)
   - [macOS ARM64](#macos-arm64)
   - [macOS AMD64](#macos-amd64)
-- [Release binaries](#release-binaries)
-- [Service templates and installed layouts](#service-templates-and-installed-layouts)
-  - [Linux templates](#linux-templates)
-  - [Windows templates](#windows-templates)
-  - [macOS templates](#macos-templates)
-- [Automatic updates and log maintenance](#automatic-updates-and-log-maintenance)
-- [Continuous integration](#continuous-integration)
-- [Release workflow](#release-workflow)
-- [Branch and pull-request workflow](#branch-and-pull-request-workflow)
-- [Local testing](#local-testing)
-- [Runtime behavior](#runtime-behavior)
-  - [Port ownership warning](#port-ownership-warning)
-  - [Configuration reload behavior](#configuration-reload-behavior)
+- [Release Binaries](#release-binaries)
+- [Service Templates and Installed Layouts](#service-templates-and-installed-layouts)
+  - [Linux Templates](#linux-templates)
+  - [Windows Templates](#windows-templates)
+  - [macOS Templates](#macos-templates)
+- [Automatic Updates and Log Maintenance](#automatic-updates-and-log-maintenance)
+- [Continuous Integration](#continuous-integration)
+- [Release Workflow](#release-workflow)
+- [Branch and Pull-Request Workflow](#branch-and-pull-request-workflow)
+- [Local Testing](#local-testing)
+- [Runtime Behavior](#runtime-behavior)
+  - [Port Ownership Warning](#port-ownership-warning)
+  - [Configuration Reload Behavior](#configuration-reload-behavior)
 - [Logging](#logging)
-- [Repository safety](#repository-safety)
+- [Repository Safety](#repository-safety)
 
-## Capabilities
+<div class="page-break"></div>
+
+# Project Overview
+
+`fbs-interlock-gateway` is a Go service that lets the FBS interlock system control networked tool interlocks through a local gateway server.
+
+The gateway receives FBS HTTP interlock requests, maps each request to a configured tool listener, communicates with the assigned Shelly relay or network interlock over HTTP or HTTPS RPC, and returns the simple JSON state response expected by FBS. Shelly communication can use HTTP Digest Authentication, mutual TLS, or both.
+
+The project is intended for controlled facility deployments where FBS communicates with the gateway and the gateway communicates with configured interlock devices. A shared in-memory status store lets normal FBS traffic passively update the local Admin UI without creating recurring Shelly status traffic.
+
+```text
+FBS server
+    -> source-restricted gateway listener
+    -> fbs-interlock-gateway
+    -> Shelly RPC over HTTP or HTTPS
+    -> Shelly-based interlock hardware
+    -> tool interlock / monitor circuit
+```
+
+The repository covers the complete interlock system boundary: application behavior, device communication, security, service supervision, deployment, maintenance, physical wiring, enclosure labeling, and auditable device identity.
+
+## Documentation Set
+
+| Document | Scope |
+| --- | --- |
+| [Linux Installation and Operations Guide](<docs/deployment guides/Linux Install Instructions.md>) | Linux build, installation, systemd supervision, UFW, updates, logging, troubleshooting, and uninstall |
+| [Windows Installation and Operations Guide](<docs/deployment guides/Windows Install Instructions.md>) | Windows deployment, Task Scheduler supervision, firewall controls, updates, logging, rollback, and uninstall |
+| [macOS Installation and Operations Guide](<docs/deployment guides/macOS Install Instructions.md>) | macOS deployment, LaunchDaemons, Application Firewall, Packet Filter, updates, logging, rollback, and uninstall |
+| [Shelly Interlock Hardware Guide](<docs/hardware/Shelly Interlock Hardware Guide.md>) | Junction-box materials, wiring configurations, label artwork, QR device identity, fabrication, verification, and maintenance |
+
+Use this README for project-wide behavior and architecture. Use the platform guides for installation and operations, and use the hardware guide for physical interlock construction and audit documentation.
+
+# Capabilities
 
 - one FBS-facing listener port per configured tool
 - FBS-compatible `/status`, `/on`, and `/off` endpoints
@@ -106,7 +147,7 @@ The project is intended for controlled facility deployments where FBS communicat
 - SHA-256 checksums for release binaries
 - a unified `make verify` validation gate
 
-## Safety and security model
+# Safety and Security Model
 
 The gateway controls access signals, but it is not a substitute for hardware safety controls.
 
@@ -134,7 +175,7 @@ Important operational rules:
 - Existing installed configurations and TLS identities are preserved during normal reinstallation on all supported platforms.
 - Real credentials, certificates, private keys, and production mappings must not be committed to the repository.
 
-### Platform firewall behavior
+## Platform Firewall Behavior
 
 The production and development installers apply the same platform security boundary. Development mode disables managed release replacement; it does not weaken runtime firewall controls.
 
@@ -153,35 +194,36 @@ FBS_PORT_RANGE = 8081:8981
 
 Review them before building a production deployment. Keep the Admin UI on `127.0.0.1`; the generated listener-range rules are not a replacement for Admin authentication or remote-access controls.
 
-## System architecture
+# System Architecture
 
 ```text
-+------------+        HTTP         +-----------------------+   HTTP or HTTPS RPC    +---------------------+
-|            |  /status /on /off   |                       |  Digest and/or mTLS    |                     |
-| FBS Server | <-----------------> | fbs-interlock-gateway | <--------------------> | Shelly Relay Box    |
-|            |                     |                       |                        | / Network Interlock |
-+------------+                     +-----------------------+                        +---------------------+
-                                           |                                                |
-                                           | successful or failed result                    v
-                                           v                                      Tool monitor / enable
-                                  +--------------------+                           circuit changes state
-                                  | Shared status store|
-                                  +--------------------+
-                                           ^
-                                           |
-                         cache-only polling|  explicit fleet refresh
-                                           |
-                                  +------------------------+
-                                  |  Local-only Admin UI   |
-                                  | http://127.0.0.1:18090 |
-                                  +------------------------+
++------------+        HTTP         +-----------------------+                        +------------------+
+|            |  /status /on /off   |                       |   HTTP or HTTPS RPC    |                  |
+| FBS Server | <-----------------> | fbs-interlock-gateway | <--------------------> | Shelly Relay Box |
+|            |                     |                       |   Digest and/or mTLS   |                  |
++------------+                     +-----------------------+                        +------------------+
+                                                |                                             |
+                                  successful or |                                             |
+                                  failed result |                                             v
+                                                v                                   Tool monitor / enable
+                                    +---------------------+                         circuit changes state
+                                    | Shared status store |
+                                    +---------------------+
+                                                ^
+                             cache-only polling |
+                         explicit fleet refresh | 
+                                                |
+                                   +------------------------+
+                                   |  Local-only Admin UI   |
+                                   | http://127.0.0.1:18090 |
+                                   +------------------------+
 ```
 
 Normal FBS traffic updates only the affected tool row in the shared status store. The browser reads that in-memory snapshot every three seconds without contacting any Shelly. The **Refresh Status** action explicitly runs a fleet-wide `Switch.GetStatus` scan with up to 32 workers and publishes each completed result immediately. FBS requests have priority over Admin probes for the same device.
 
-## Interlock hardware
+# Interlock Hardware
 
-The software is designed to operate with custom Shelly-based interlock junction boxes. Version-controlled hardware documentation is maintained under [`docs/hardware/`](docs/hardware/README.md).
+The software is designed to operate with custom Shelly-based interlock junction boxes. Documentation on how to build the hardware interlocks is maintained under [`docs/hardware/`](<docs/hardware/Shelly Interlock Hardware Guide.md>).
 
 The hardware documentation includes:
 
@@ -197,7 +239,7 @@ Each junction-box QR code records the installed Shelly identity in a compact JSO
 
 The diagrams document the associated interlock hardware but do not replace qualified electrical review, applicable codes, equipment ratings, or facility safety requirements.
 
-## Repository layout
+# Repository Layout
 
 ```text
 cmd/fbs-interlock-gateway/
@@ -260,7 +302,7 @@ docs/
 
 The generated `pki/`, `tls/`, and `build/` directories are intentionally excluded from version control.
 
-## FBS-facing behavior
+# FBS-Facing Behavior
 
 The gateway exposes one HTTP listener per enabled tool. Each configured listener port represents one interlock target.
 
@@ -280,7 +322,7 @@ FBS only needs the gateway hostname and assigned gateway port. Shelly hostnames,
 
 The FBS server does not impose a fixed three-second response write deadline. The Shelly client's configured end-to-end timeout controls the device operation, allowing valid HTTPS and mutual-TLS requests to complete when `defaults.timeout_ms` is intentionally greater than three seconds.
 
-### Endpoints
+## Endpoints
 
 ```text
 http://<gateway-host>:<port>/status
@@ -315,7 +357,7 @@ Responses remain intentionally simple for FBS compatibility:
 
 A successful `/status`, `/on`, or `/off` operation updates the corresponding Admin status row. A failed Shelly operation records `connected: false`, the configured safe output, and the error before returning the safe state to FBS.
 
-## Gateway-to-Shelly communication
+# Gateway-to-Shelly Communication
 
 Each tool selects its RPC scheme with `tools[].protocol`. Supported values are `http` and `https`; an omitted value remains backward-compatible and defaults to `http`.
 
@@ -346,7 +388,7 @@ When a username and password are configured, the gateway also uses HTTP Digest A
 
 When credentials are blank or `null`, the gateway performs the RPC without a Digest Authorization header.
 
-### Connection, authentication, priority, and recovery behavior
+## Connection, Authentication, Priority, and Recovery Behavior
 
 Each Shelly request attempt is bounded by `defaults.timeout_ms`. DNS, TCP connect, TLS handshake, and response-header phases are bounded within that attempt. `Switch.GetStatus` may perform one additional transient-network retry after a short delay, so a failed status operation can consume two attempt budgets plus the retry delay.
 
@@ -369,7 +411,7 @@ Additional behavior:
 - response and error bodies are bounded to 4 KiB
 - network failures identify the observed phase such as DNS lookup, TCP connect, TLS handshake, response headers, or response body, and report whether the connection was reused or the TLS session resumed
 
-## Shelly authentication helper
+# Shelly Authentication Helper
 
 The repository includes:
 
@@ -400,11 +442,11 @@ The helper:
 
 The runtime client caches the resulting Digest challenge state per device, reducing repeated unauthenticated challenge round trips.
 
-## Shelly mutual TLS
+# Shelly Mutual TLS
 
 The project uses two private certificate authorities so server and client trust are separated.
 
-### Certificate roles
+## Certificate Roles
 
 | File | Role | Installed or uploaded to |
 | --- | --- | --- |
@@ -417,7 +459,7 @@ The project uses two private certificate authorities so server and client trust 
 | `shelly-server.crt` | Unique HTTPS server identity for one Shelly hostname. | Matching Shelly device |
 | `shelly-server.key` | Private key for that Shelly server certificate. | Matching Shelly device |
 
-### Generate the certificate authorities and gateway identity
+## Generate the Certificate Authorities and Gateway Identity
 
 Generate both private CAs:
 
@@ -454,7 +496,7 @@ tls/
 
 Upload `pki/ca/client-ca.crt` to every Shelly as the CA authorized to verify the gateway client certificate.
 
-### Generate a Shelly server certificate
+## Generate a Shelly Server Certificate
 
 Run:
 
@@ -481,7 +523,7 @@ pki/shellys/<interlock-name>/
 
 Install the generated `shelly-server.crt` and `shelly-server.key` on the matching device. Keep all CA private keys and generated device private keys securely outside the repository.
 
-## Admin UI
+# Admin UI
 
 The Admin UI is embedded in the Go executable with Go's `embed` package.
 
@@ -522,7 +564,7 @@ The interface provides:
 
 Disabled tools remain visible in configuration and status data but are not contacted.
 
-### Passive status model
+## Passive Status Model
 
 The Admin UI is not a second device-control loop.
 
@@ -543,7 +585,7 @@ The shared store uses monotonically increasing revisions. A slow manual refresh 
 
 A successful `/on` or `/off` result represents the state accepted by `Switch.Set`. Use **Refresh Status** when an independent `Switch.GetStatus` verification is required.
 
-### FBS-priority scheduling
+## FBS-Priority Scheduling
 
 Admin status probes use a distinct low-priority Shelly operation:
 
@@ -555,7 +597,7 @@ Admin status probes use a distinct low-priority Shelly operation:
 
 This keeps Admin fleet verification responsive without allowing it to consume the FBS request timeout budget.
 
-### Admin server protections
+## Admin Server Protections
 
 The Admin server includes:
 
@@ -580,7 +622,7 @@ The Admin server includes:
 
 Keep the Admin UI on loopback whenever possible.
 
-### Admin address flag
+## Admin Address Flag
 
 Set an explicit address:
 
@@ -598,7 +640,7 @@ Disable the Admin UI:
   -admin ""
 ```
 
-### Remote access with an SSH tunnel
+## Remote Access with an SSH Tunnel
 
 ```bash
 ssh -L 18090:127.0.0.1:18090 fbs-gateway@<gateway-host>
@@ -610,7 +652,7 @@ Then open:
 http://127.0.0.1:18090
 ```
 
-## Admin API
+# Admin API
 
 ```text
 GET  /api/config
@@ -620,7 +662,7 @@ GET  /api/status?refresh=1
 POST /api/restart
 ```
 
-### `GET /api/config`
+## `GET /api/config`
 
 Returns the loaded configuration without returning stored passwords. The response includes normalized per-tool protocols and the gateway `defaults.shelly_tls` paths.
 
@@ -634,7 +676,7 @@ A tool with a stored password reports:
 
 An omitted tool protocol is returned as `http`.
 
-### `PUT /api/config`
+## `PUT /api/config`
 
 Accepts edited configuration, validates it, preserves existing passwords unless replacement or clearing is explicitly requested, writes the file atomically, and creates `config.yaml.bak` from the previous file when possible.
 
@@ -647,7 +689,7 @@ The request can update:
 
 A successful response indicates that a restart is required.
 
-### `GET /api/status`
+## `GET /api/status`
 
 Returns the current shared in-memory snapshot and does not contact Shelly devices:
 
@@ -676,7 +718,7 @@ Enabled tools begin with the configured safe output and `status not yet refreshe
 
 When an interlock operation fails, `connected` is `false`, the configured safe output is reported, and the error is included.
 
-### `GET /api/status?refresh=1`
+## `GET /api/status?refresh=1`
 
 Starts one asynchronous fleet-wide `Switch.GetStatus` refresh and immediately returns the current snapshot.
 
@@ -690,11 +732,11 @@ Additional explicit refresh requests share the in-progress scan rather than crea
 
 Refresh results are merged by tool and revision. A result from an older scan cannot overwrite a newer FBS-derived status.
 
-### `POST /api/restart`
+## `POST /api/restart`
 
 Requests a clean process restart. The platform service supervisor starts the process again in an installed deployment.
 
-## Configuration
+# Configuration
 
 The service loads YAML from the path supplied with `-config`.
 
@@ -768,7 +810,7 @@ Existing configurations that omit `tools[].protocol` continue to use `http`. Exi
 
 When any TLS path is populated, the gateway initializes its TLS client from those files during startup. When an enabled tool uses `https`, all three TLS path fields are required.
 
-### Config fields
+## Config Fields
 
 | Field | Purpose |
 | --- | --- |
@@ -787,7 +829,7 @@ When any TLS path is populated, the gateway initializes its TLS client from thos
 | `tools[].password` | Optional Shelly RPC password used for Digest Authentication. |
 | `tools[].enabled` | Whether the gateway starts the listener and contacts the device. |
 
-### Validation
+## Validation
 
 Validation includes:
 
@@ -803,11 +845,11 @@ Validation includes:
 
 Invalid configuration is not written. Missing or unreadable configured TLS files also prevent the gateway from starting.
 
-### Configuration ownership
+## Configuration Ownership
 
 The gateway deep-clones configuration when it is accepted and whenever a snapshot is returned. The clone includes the `tools` backing array and the optional username/password string values. Callers therefore cannot mutate the gateway's internal configuration by editing a returned snapshot or by retaining references to a configuration supplied to `New` or `UpdateConfig`.
 
-## Development and validation
+# Development and Validation
 
 Use the Go version declared in `go.mod`.
 
@@ -873,9 +915,9 @@ Deployment package builds additionally require the PDF toolchain described below
 
 The private `pki/` and staged runtime `tls/` directories are ignored by Git.
 
-## Building deployment packages
+# Building Deployment Packages
 
-### Prepare runtime TLS files
+## Prepare Runtime TLS Files
 
 Every Linux, Windows, and macOS deployment build requires these repository-local runtime files:
 
@@ -897,7 +939,7 @@ Each platform build fails before packaging when any required runtime TLS file is
 
 The staged private key is created with mode `0600`; the certificates use `0644`. Platform installers then apply the native installed permissions required by their service accounts.
 
-### Deployment-guide PDF requirements
+## Deployment-Guide PDF Requirements
 
 Deployment builds render every matching Markdown guide from `docs/deployment guides/` into a PDF in the corresponding platform build directory.
 
@@ -930,7 +972,7 @@ make build-linux-amd64 \
 
 The build fails when no guide matches the selected pattern.
 
-### Linux
+## Linux
 
 ```bash
 make build-linux-amd64
@@ -941,7 +983,7 @@ Both commands generate `build/linux/`. Run only the architecture target needed f
 
 The normal `install.sh` installs and enables managed automatic updates. `install-dev.sh` disables existing updater units and installs the current build without managed release replacement. Both apply the same service-account, TLS, firewall, and configuration protections. The package also includes `uninstall.sh`.
 
-### Windows AMD64
+## Windows AMD64
 
 ```bash
 make build-windows-amd64
@@ -949,7 +991,7 @@ make build-windows-amd64
 
 The Windows package includes production and development launchers, the PowerShell installer, startup supervisor, checksum-aware updater, uninstaller, runtime TLS files, and rendered guide PDFs.
 
-### macOS Apple Silicon
+## macOS Apple Silicon
 
 ```bash
 make build-darwin-arm64
@@ -957,7 +999,7 @@ make build-darwin-arm64
 
 `make build` and `make build-mac` remain aliases for the Apple Silicon deployment build.
 
-### macOS Intel
+## macOS Intel
 
 ```bash
 make build-darwin-amd64
@@ -965,7 +1007,7 @@ make build-darwin-amd64
 
 Both macOS packages include production and development installers, the startup wrapper, gateway and update LaunchDaemon property lists, updater, Packet Filter anchor, uninstaller, runtime TLS files, and rendered guide PDFs.
 
-### Generate template-derived files only
+## Generate Template-Derived Files Only
 
 ```bash
 make windows-deployment-files
@@ -976,7 +1018,7 @@ make macos-deployment-files
 
 These targets render scripts and service definitions but do not build the executable or copy runtime TLS material.
 
-### Generate deployment-guide PDFs only
+## Generate Deployment-Guide PDFs Only
 
 ```bash
 make linux-deployment-guides
@@ -987,9 +1029,9 @@ make macos-amd64-deployment-guides
 
 Generated deployment files are build artifacts. Edit source templates, Markdown guides, or Makefile variables instead of editing generated copies.
 
-## Deployment build output
+# Deployment Build Output
 
-### Linux
+## Linux
 
 ```text
 build/linux/
@@ -1009,7 +1051,7 @@ build/linux/
 └── Linux Install Instructions.pdf
 ```
 
-### Windows
+## Windows
 
 ```text
 build/windows/
@@ -1030,7 +1072,7 @@ build/windows/
 └── Windows Install Instructions.pdf
 ```
 
-### macOS ARM64
+## macOS ARM64
 
 ```text
 build/darwin/arm64/
@@ -1051,7 +1093,7 @@ build/darwin/arm64/
 └── macOS Install Instructions.pdf
 ```
 
-### macOS AMD64
+## macOS AMD64
 
 ```text
 build/darwin/amd64/
@@ -1074,7 +1116,7 @@ build/darwin/amd64/
 
 The exact PDF filenames follow the matching source Markdown basenames. Generated deployment files are build artifacts; edit their templates, guides, or Makefile variables and rebuild.
 
-## Release binaries
+# Release Binaries
 
 Build all release binaries and checksums through the validation gate:
 
@@ -1122,9 +1164,9 @@ Output format:
 fbs-interlock-gateway version=<version> commit=<commit> date=<UTC-build-time>
 ```
 
-## Service templates and installed layouts
+# Service Templates and Installed Layouts
 
-### Linux templates
+## Linux Templates
 
 ```text
 services/linux/
@@ -1177,7 +1219,7 @@ The systemd service runs from `/etc/fbs-interlock-gateway`, writes to journald, 
 
 The installed uninstaller removes the executable, updater, systemd units, and gateway-specific UFW rule. Standard uninstall preserves `/etc/fbs-interlock-gateway/config.yaml`, the installed `tls/` directory, and the service account. `--purge` removes the complete configuration directory while still preserving the service account and normal journal history.
 
-### Windows templates
+## Windows Templates
 
 ```text
 services/windows/
@@ -1228,7 +1270,7 @@ Development installation removes the managed update task and scripts while prese
 
 The standard uninstaller removes tasks, running processes, application and updater files, executable backups, and gateway firewall rules while preserving `config.yaml`, the installed `tls\` directory, and `logs\`. Purge mode also removes the preserved configuration, TLS files, and logs.
 
-### macOS templates
+## macOS Templates
 
 ```text
 services/macos/
@@ -1296,11 +1338,11 @@ docs/deployment guides/macOS Install Instructions.md
 
 Deployment packages contain rendered PDF copies of the matching guides.
 
-## Automatic updates and log maintenance
+# Automatic Updates and Log Maintenance
 
 Production installers enable managed release checks. Development installers keep the locally built gateway and disable managed release replacement. All updaters modify only the application executable and, where applicable, gateway log archives; they do not replace `config.yaml` or installed TLS files.
 
-### Linux
+## Linux
 
 The generated systemd timer runs after boot and then periodically.
 
@@ -1331,7 +1373,7 @@ Run an update manually:
 sudo /opt/fbs-interlock-gateway/update.sh
 ```
 
-### Windows
+## Windows
 
 Production installation creates the `FBS Interlock Gateway Update` Task Scheduler task. It begins at minute `17` and repeats once per hour under `SYSTEM`.
 
@@ -1356,7 +1398,7 @@ Run the update task manually:
 Start-ScheduledTask -TaskName "FBS Interlock Gateway Update"
 ```
 
-### macOS
+## macOS
 
 Production installation creates `system/com.williamveith.fbs-interlock-gateway-update`. The LaunchDaemon runs at minute `17` of every hour with low-priority I/O.
 
@@ -1384,7 +1426,7 @@ sudo /usr/local/libexec/fbs-interlock-gateway/update.sh
 
 Use the packaged development installer on any platform when testing an unpublished local build, then run the normal production installer to restore managed updates.
 
-## Continuous integration
+# Continuous Integration
 
 The CI workflow runs for pull requests and pushes to `main`.
 
@@ -1403,7 +1445,7 @@ It:
 
 The macOS and Windows binaries are cross-compiled and format-checked on the Linux runner. They are not executed by that runner.
 
-## Release workflow
+# Release Workflow
 
 Releases are created through the manually triggered **Validate, Tag, and Release** GitHub Actions workflow.
 
@@ -1448,7 +1490,7 @@ git tag -v <version>
 gh release view <version>
 ```
 
-## Branch and pull-request workflow
+# Branch and Pull-Request Workflow
 
 Start from current `main`:
 
@@ -1498,7 +1540,7 @@ git fetch --prune
 git branch -d feature/<description>
 ```
 
-## Local testing
+# Local Testing
 
 Create a local config:
 
@@ -1595,7 +1637,7 @@ curl "http://<gateway-host>:<port>/on"
 curl "http://<gateway-host>:<port>/off"
 ```
 
-## Runtime behavior
+# Runtime Behavior
 
 On startup, the gateway:
 
@@ -1633,15 +1675,15 @@ During operation:
 
 Disabled tools do not receive FBS listeners and are not contacted by explicit status refreshes.
 
-### Port ownership warning
+## Port Ownership Warning
 
 Before starting an enabled listener, the gateway may clear a process already using that configured port. Use dedicated gateway ports and confirm that unrelated services do not use the configured range.
 
-### Configuration reload behavior
+## Configuration Reload Behavior
 
 A successful Admin UI save writes the updated configuration and requests a process restart. The installed platform supervisor rebuilds runtime listeners, the shared status store, the Shelly transport, TLS trust, Digest state, and per-device scheduling state by starting the process again.
 
-## Logging
+# Logging
 
 Gateway FBS request logs use:
 
@@ -1703,7 +1745,7 @@ macOS updater stdout/stderr:
 
 The Windows and macOS production updaters rotate `gateway.log` and `gateway-error.log` at 10 MiB and retain up to 30 compressed archives per file. Linux runtime retention remains controlled by the host's journald configuration.
 
-## Repository safety
+# Repository Safety
 
 Ignored local artifacts:
 

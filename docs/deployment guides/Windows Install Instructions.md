@@ -1,8 +1,8 @@
 ---
 title: "FBS Interlock Gateway"
 subtitle: "Windows Installation and Operations Guide"
-author: "Deployment Guide"
-date: ""
+author: "William Veith"
+date: "2026-08-06"
 lang: en-US
 ---
 
