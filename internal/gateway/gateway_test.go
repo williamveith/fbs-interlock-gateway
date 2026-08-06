@@ -585,3 +585,48 @@ func writeGatewayTestFile(t *testing.T, path string, data []byte) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestConfigSnapshotReturnsIndependentCopy(t *testing.T) {
+	username := "admin"
+	password := "secret"
+
+	cfg := testConfig("off")
+	cfg.Tools[0].Username = &username
+	cfg.Tools[0].Password = &password
+
+	gateway := New(cfg, "/tmp/config.yaml", "")
+
+	snapshot := gateway.ConfigSnapshot()
+
+	snapshot.Tools[0].InterlockName = "CHANGED"
+	snapshot.Tools[0].Enabled = false
+	*snapshot.Tools[0].Username = "changed-user"
+	*snapshot.Tools[0].Password = "changed-password"
+
+	secondSnapshot := gateway.ConfigSnapshot()
+
+	if secondSnapshot.Tools[0].InterlockName != "EQU-TEST-01" {
+		t.Fatalf(
+			"stored name changed to %q",
+			secondSnapshot.Tools[0].InterlockName,
+		)
+	}
+
+	if !secondSnapshot.Tools[0].Enabled {
+		t.Fatal("stored Enabled changed to false")
+	}
+
+	if got := *secondSnapshot.Tools[0].Username; got != "admin" {
+		t.Fatalf(
+			"stored username = %q, want admin",
+			got,
+		)
+	}
+
+	if got := *secondSnapshot.Tools[0].Password; got != "secret" {
+		t.Fatalf(
+			"stored password = %q, want secret",
+			got,
+		)
+	}
+}

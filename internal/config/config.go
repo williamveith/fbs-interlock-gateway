@@ -44,6 +44,28 @@ type Tool struct {
 	Enabled       bool    `yaml:"enabled" json:"enabled"`
 }
 
+func Clone(cfg Config) Config {
+	cloned := cfg
+	cloned.Tools = make([]Tool, len(cfg.Tools))
+
+	for i, tool := range cfg.Tools {
+		cloned.Tools[i] = tool
+		cloned.Tools[i].Username = cloneString(tool.Username)
+		cloned.Tools[i].Password = cloneString(tool.Password)
+	}
+
+	return cloned
+}
+
+func cloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+	return &cloned
+}
+
 func Load(path string) (Config, error) {
 	var cfg Config
 

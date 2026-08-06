@@ -305,3 +305,54 @@ func TestValidateIncludesDisabledHTTPSWhenValidatingWholeConfig(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want TLS configuration error", err)
 	}
 }
+
+func TestCloneReturnsIndependentCopy(t *testing.T) {
+	username := "admin"
+	password := "secret"
+
+	original := Config{
+		Bind: "127.0.0.1",
+		Tools: []Tool{
+			{
+				InterlockName: "TEST",
+				IP:            "192.0.2.10",
+				Port:          8081,
+				Username:      &username,
+				Password:      &password,
+				Enabled:       true,
+			},
+		},
+	}
+
+	cloned := Clone(original)
+
+	cloned.Tools[0].InterlockName = "CHANGED"
+	cloned.Tools[0].Enabled = false
+	*cloned.Tools[0].Username = "different-user"
+	*cloned.Tools[0].Password = "different-password"
+
+	if original.Tools[0].InterlockName != "TEST" {
+		t.Fatalf(
+			"original name changed to %q",
+			original.Tools[0].InterlockName,
+		)
+	}
+
+	if !original.Tools[0].Enabled {
+		t.Fatal("original Enabled changed to false")
+	}
+
+	if got := *original.Tools[0].Username; got != "admin" {
+		t.Fatalf(
+			"original username = %q, want admin",
+			got,
+		)
+	}
+
+	if got := *original.Tools[0].Password; got != "secret" {
+		t.Fatalf(
+			"original password = %q, want secret",
+			got,
+		)
+	}
+}
