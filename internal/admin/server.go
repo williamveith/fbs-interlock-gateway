@@ -26,7 +26,7 @@ const (
 	maxConfigRequestBytes = 1 << 20 // 1 MiB
 	maxHeaderBytes        = 32 << 10
 
-	maxConcurrentStatusRequests   = 4
+	maxConcurrentStatusRequests   = 32
 	statusRefreshTimeout          = 2 * time.Minute
 	statusRefreshInProgressHeader = "X-Status-Refresh-In-Progress"
 
