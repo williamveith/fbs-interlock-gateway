@@ -39,7 +39,7 @@ SERVICE_GROUP ?= $(SERVICE_USER)
 FBS_SOURCE_IP=146.6.76.61
 FBS_PORT_RANGE=8081:8981
 
-DEPLOYMENT_GUIDES_DIR := deployment guides
+DEPLOYMENT_GUIDES_DIR := docs/deployment guides
 
 # Every Markdown guide matching the platform pattern is rendered to PDF and
 # placed in that platform's build directory. Override a pattern at invocation
@@ -51,7 +51,7 @@ MACOS_DEPLOYMENT_GUIDE_PATTERN ?= macOS*.md
 
 PANDOC ?= pandoc
 PDF_ENGINE ?= xelatex
-PDF_MARGIN ?= 0.5in
+PDF_MARGIN ?= 0.3in
 PDF_FONT_SIZE ?= 12pt
 PDF_MAIN_FONT ?= IBMPlexMono-Regular
 PDF_MONO_FONT ?= IBMPlexMono-Regular
@@ -582,7 +582,7 @@ init-config:
 			'bind: 0.0.0.0' \
 			'' \
 			'defaults:' \
-			'  timeout_ms: 10000' \
+			'  timeout_ms: 3000' \
 			'  safe_state_on_error: "off"' \
 			'  shelly_tls:' \
 			'    server_ca_file: "./tls/server-ca.crt"' \

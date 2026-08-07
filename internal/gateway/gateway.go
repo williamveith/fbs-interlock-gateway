@@ -26,8 +26,13 @@ type Gateway struct {
 	initErr     error
 }
 
-func New(cfg config.Config, configPath string, adminAddr string) *Gateway {
+func New(
+	cfg config.Config,
+	configPath string,
+	adminAddr string,
+) *Gateway {
 	config.ApplyDefaults(&cfg)
+	cfg = config.Clone(cfg)
 
 	shellyClient, err := shelly.NewClientWithTLS(
 		time.Duration(cfg.Defaults.TimeoutMS)*time.Millisecond,
@@ -127,7 +132,8 @@ func (g *Gateway) Run(ctx context.Context) error {
 func (g *Gateway) ConfigSnapshot() config.Config {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.cfg
+
+	return config.Clone(g.cfg)
 }
 
 func (g *Gateway) SafeOutput() bool {
@@ -138,6 +144,7 @@ func (g *Gateway) SafeOutput() bool {
 
 func (g *Gateway) UpdateConfig(newCfg config.Config) error {
 	config.ApplyDefaults(&newCfg)
+	newCfg = config.Clone(newCfg)
 
 	if err := config.Validate(newCfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)

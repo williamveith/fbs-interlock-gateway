@@ -1,8 +1,8 @@
 ---
 title: "FBS Interlock Gateway"
 subtitle: "Windows Installation and Operations Guide"
-author: "Deployment Guide"
-date: ""
+author: "William Veith"
+date: "2026-08-06"
 lang: en-US
 ---
 
@@ -547,11 +547,9 @@ For an HTTPS or mutual-TLS Shelly configuration, review `gateway-error.log` for 
 
 # View the Admin Panel
 
-Open a browser on the gateway computer and navigate to:
+On the gateway machine, open the following address in a web browser:
 
-```text
-http://127.0.0.1:18090
-```
+<http://127.0.0.1:18090>
 
 The Admin status API is:
 

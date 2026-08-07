@@ -7,6 +7,13 @@ import (
 	"strings"
 )
 
+// ErrAdminStatusDeferred reports that an Admin UI status probe was skipped or
+// canceled because a higher-priority FBS operation needed the same Shelly.
+// It is an expected scheduling outcome, not a device connectivity failure.
+var ErrAdminStatusDeferred = errors.New(
+	"admin status request deferred to FBS activity",
+)
+
 // HTTPError represents a non-2xx response returned by a Shelly RPC endpoint.
 // Callers can use errors.As or IsHTTPStatus instead of matching error strings.
 type HTTPError struct {

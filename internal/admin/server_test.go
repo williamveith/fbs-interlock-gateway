@@ -51,13 +51,35 @@ type fakeStatusClient struct {
 		ctx context.Context,
 		tool config.Tool,
 	) (shelly.SwitchStatus, error)
+
+	getStatusAdmin func(
+		ctx context.Context,
+		tool config.Tool,
+	) (shelly.SwitchStatus, error)
 }
 
 func (f fakeStatusClient) GetStatus(
 	ctx context.Context,
 	tool config.Tool,
 ) (shelly.SwitchStatus, error) {
+	if f.getStatus == nil {
+		return shelly.SwitchStatus{},
+			errors.New("unexpected GetStatus call")
+	}
+
 	return f.getStatus(ctx, tool)
+}
+
+func (f fakeStatusClient) GetStatusAdmin(
+	ctx context.Context,
+	tool config.Tool,
+) (shelly.SwitchStatus, error) {
+	if f.getStatusAdmin != nil {
+		return f.getStatusAdmin(ctx, tool)
+	}
+
+	// Preserve all existing tests that initialize only getStatus.
+	return f.GetStatus(ctx, tool)
 }
 
 func newTestAdminServer(
@@ -487,10 +509,16 @@ func TestCollectStatuses(t *testing.T) {
 		nil,
 	)
 
-	results, err := server.collectStatuses(context.Background())
-	if err != nil {
+	revision := server.statusStore.NextRevision()
+
+	if err := server.collectStatuses(
+		context.Background(),
+		revision,
+	); err != nil {
 		t.Fatalf("collectStatuses() error = %v", err)
 	}
+
+	results := server.statusStore.Snapshot()
 
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
@@ -1264,5 +1292,214 @@ func TestStatusReadReturnsSharedStoreUpdate(t *testing.T) {
 	}
 	if !rows[0].Connected || !rows[0].Output || rows[0].Error != "" {
 		t.Fatalf("shared status row = %#v", rows[0])
+	}
+}
+
+func TestCollectStatusesPublishesAndPreservesPartialResults(
+	t *testing.T,
+) {
+	store := &fakeConfigStore{
+		cfg: config.Config{
+			Tools: []config.Tool{
+				{
+					InterlockName: "FAST",
+					IP:            "192.0.2.10",
+					Port:          8081,
+					SwitchID:      0,
+					Enabled:       true,
+				},
+				{
+					InterlockName: "BLOCKED",
+					IP:            "192.0.2.11",
+					Port:          8082,
+					SwitchID:      0,
+					Enabled:       true,
+				},
+			},
+		},
+	}
+
+	blockedStarted := make(chan struct{})
+
+	server := newTestAdminServer(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{
+			getStatus: func(
+				ctx context.Context,
+				tool config.Tool,
+			) (shelly.SwitchStatus, error) {
+				switch tool.InterlockName {
+				case "FAST":
+					return shelly.SwitchStatus{
+						Output: true,
+					}, nil
+
+				case "BLOCKED":
+					close(blockedStarted)
+
+					<-ctx.Done()
+
+					return shelly.SwitchStatus{},
+						ctx.Err()
+
+				default:
+					return shelly.SwitchStatus{},
+						errors.New("unexpected tool")
+				}
+			},
+		},
+		nil,
+	)
+
+	ctx, cancel := context.WithCancel(
+		context.Background(),
+	)
+	defer cancel()
+
+	revision := server.statusStore.NextRevision()
+	collectionDone := make(chan error, 1)
+
+	go func() {
+		collectionDone <- server.collectStatuses(
+			ctx,
+			revision,
+		)
+	}()
+
+	select {
+	case <-blockedStarted:
+		// The blocked request is now keeping collection in progress.
+	case <-time.After(time.Second):
+		t.Fatal("blocked status request did not start")
+	}
+
+	// Wait until the fast result has been published even though the
+	// complete fleet collection is still running.
+	deadline := time.Now().Add(time.Second)
+
+	for {
+		rows := server.statusStore.Snapshot()
+
+		if rows[0].Connected && rows[0].Output {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"fast status was not published incrementally: %#v",
+				rows[0],
+			)
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	select {
+	case err := <-collectionDone:
+		t.Fatalf(
+			"collection completed before blocked request was canceled: %v",
+			err,
+		)
+	default:
+		// Collection remains active, but the fast result is visible.
+	}
+
+	cancel()
+
+	select {
+	case err := <-collectionDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf(
+				"collectStatuses() error = %v, want context canceled",
+				err,
+			)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("collectStatuses did not stop after cancellation")
+	}
+
+	// The completed result must remain stored after the overall
+	// collection fails or times out.
+	rows := server.statusStore.Snapshot()
+
+	if !rows[0].Connected || !rows[0].Output {
+		t.Fatalf(
+			"completed result was discarded after cancellation: %#v",
+			rows[0],
+		)
+	}
+}
+
+func TestCollectStatusesPreservesRowWhenAdminStatusDeferred(
+	t *testing.T,
+) {
+	tool := config.Tool{
+		InterlockName: "TEST",
+		IP:            "192.0.2.10",
+		Port:          8081,
+		SwitchID:      0,
+		Enabled:       true,
+	}
+
+	store := &fakeConfigStore{
+		cfg: config.Config{
+			Tools: []config.Tool{tool},
+		},
+	}
+
+	server := newTestAdminServer(
+		"127.0.0.1:0",
+		store,
+		fakeStatusClient{
+			getStatusAdmin: func(
+				context.Context,
+				config.Tool,
+			) (shelly.SwitchStatus, error) {
+				return shelly.SwitchStatus{},
+					shelly.ErrAdminStatusDeferred
+			},
+		},
+		nil,
+	)
+
+	// Seed an existing valid result that the deferred Admin probe
+	// must not replace with an error.
+	fbsRevision := server.statusStore.NextRevision()
+	server.statusStore.RecordSuccess(
+		tool,
+		true,
+		fbsRevision,
+	)
+
+	adminRevision := server.statusStore.NextRevision()
+
+	if err := server.collectStatuses(
+		context.Background(),
+		adminRevision,
+	); err != nil {
+		t.Fatalf("collectStatuses() error = %v", err)
+	}
+
+	rows := server.statusStore.Snapshot()
+
+	if len(rows) != 1 {
+		t.Fatalf("status count = %d, want 1", len(rows))
+	}
+
+	if !rows[0].Connected {
+		t.Fatal("deferred Admin status replaced connected state")
+	}
+
+	if !rows[0].Output {
+		t.Fatal("deferred Admin status replaced output=true")
+	}
+
+	if rows[0].Error != "" {
+		t.Fatalf(
+			"deferred Admin status recorded error %q",
+			rows[0].Error,
+		)
 	}
 }

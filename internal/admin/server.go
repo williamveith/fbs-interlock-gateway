@@ -26,7 +26,7 @@ const (
 	maxConfigRequestBytes = 1 << 20 // 1 MiB
 	maxHeaderBytes        = 32 << 10
 
-	maxConcurrentStatusRequests   = 4
+	maxConcurrentStatusRequests   = 32
 	statusRefreshTimeout          = 2 * time.Minute
 	statusRefreshInProgressHeader = "X-Status-Refresh-In-Progress"
 
@@ -45,7 +45,7 @@ type ConfigStore interface {
 }
 
 type StatusClient interface {
-	GetStatus(
+	GetStatusAdmin(
 		ctx context.Context,
 		tool config.Tool,
 	) (shelly.SwitchStatus, error)
@@ -500,18 +500,15 @@ func (s *Server) refreshStatuses(revision uint64) {
 	)
 	defer cancel()
 
-	results, err := s.collectStatuses(ctx)
-	if err == nil {
-		for _, result := range results {
-			s.statusStore.Record(result, revision)
-		}
-	}
+	// Always release the refresh lock, regardless of whether collection
+	// completes successfully or the refresh context expires.
+	defer func() {
+		s.statusMu.Lock()
+		s.statusRefreshInFlight = false
+		s.statusMu.Unlock()
+	}()
 
-	s.statusMu.Lock()
-	s.statusRefreshInFlight = false
-	s.statusMu.Unlock()
-
-	if err != nil {
+	if err := s.collectStatuses(ctx, revision); err != nil {
 		log.Printf(
 			"admin status refresh failed: %v",
 			err,
@@ -519,40 +516,39 @@ func (s *Server) refreshStatuses(revision uint64) {
 	}
 }
 
-func (s *Server) collectStatuses(ctx context.Context) ([]ToolStatus, error) {
+func (s *Server) collectStatuses(
+	ctx context.Context,
+	revision uint64,
+) error {
 	cfg := s.store.ConfigSnapshot()
 	safeOutput := s.store.SafeOutput()
-
-	results := make([]ToolStatus, len(cfg.Tools))
 	enabledCount := 0
 
-	for i, tool := range cfg.Tools {
-		results[i] = ToolStatus{
-			InterlockName: tool.InterlockName,
-			IP:            tool.IP,
-			Protocol:      config.ToolProtocol(tool),
-			Port:          tool.Port,
-			SwitchID:      tool.SwitchID,
-			Enabled:       tool.Enabled,
-		}
-
+	// Disabled tools do not require a Shelly request, so publish their
+	// configuration rows immediately.
+	for _, tool := range cfg.Tools {
 		if tool.Enabled {
 			enabledCount++
+			continue
 		}
+
+		s.statusStore.Record(
+			adminToolStatus(tool),
+			revision,
+		)
 	}
 
 	if enabledCount == 0 {
-		return results, nil
+		return nil
 	}
 
-	workerCount := min(enabledCount, maxConcurrentStatusRequests)
+	workerCount := min(
+		enabledCount,
+		maxConcurrentStatusRequests,
+	)
 
-	type statusJob struct {
-		index int
-		tool  config.Tool
-	}
+	jobs := make(chan config.Tool)
 
-	jobs := make(chan statusJob)
 	var workers sync.WaitGroup
 	workers.Add(workerCount)
 
@@ -560,33 +556,47 @@ func (s *Server) collectStatuses(ctx context.Context) ([]ToolStatus, error) {
 		go func() {
 			defer workers.Done()
 
-			for job := range jobs {
+			for tool := range jobs {
 				if ctx.Err() != nil {
 					return
 				}
 
-				status, err := s.statusClient.GetStatus(ctx, job.tool)
-				if err != nil {
-					results[job.index].Connected = false
-					results[job.index].Output = safeOutput
-					results[job.index].Error = err.Error()
+				switchStatus, err :=
+					s.statusClient.GetStatusAdmin(ctx, tool)
+
+				if errors.Is(err, shelly.ErrAdminStatusDeferred) {
+					// Preserve the existing row. The FBS operation that displaced
+					// this probe will publish the authoritative result.
 					continue
 				}
 
-				results[job.index].Connected = true
-				results[job.index].Output = status.Output
+				if err != nil {
+					s.statusStore.RecordFailure(
+						tool,
+						safeOutput,
+						err,
+						revision,
+					)
+					continue
+				}
+
+				s.statusStore.RecordSuccess(
+					tool,
+					switchStatus.Output,
+					revision,
+				)
 			}
 		}()
 	}
 
 sendJobs:
-	for i, tool := range cfg.Tools {
+	for _, tool := range cfg.Tools {
 		if !tool.Enabled {
 			continue
 		}
 
 		select {
-		case jobs <- statusJob{index: i, tool: tool}:
+		case jobs <- tool:
 		case <-ctx.Done():
 			break sendJobs
 		}
@@ -595,11 +605,18 @@ sendJobs:
 	close(jobs)
 	workers.Wait()
 
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+	return ctx.Err()
+}
 
-	return results, nil
+func adminToolStatus(tool config.Tool) ToolStatus {
+	return ToolStatus{
+		InterlockName: tool.InterlockName,
+		IP:            tool.IP,
+		Protocol:      config.ToolProtocol(tool),
+		Port:          tool.Port,
+		SwitchID:      tool.SwitchID,
+		Enabled:       tool.Enabled,
+	}
 }
 
 func (s *Server) handleRestart(

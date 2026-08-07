@@ -53,9 +53,20 @@ type Client struct {
 	rebootCooldown time.Duration
 }
 
+type requestPriority uint8
+
+const (
+	requestPriorityAdmin requestPriority = iota
+	requestPriorityFBS
+)
+
 type deviceAuthState struct {
 	gate    chan struct{}
 	session *digestSession
+
+	mu                sync.Mutex
+	fbsWaiters        int
+	activeAdminCancel context.CancelCauseFunc
 }
 
 type releaseOnCloseBody struct {
@@ -67,6 +78,19 @@ type releaseOnCloseBody struct {
 func (b *releaseOnCloseBody) Close() error {
 	defer b.once.Do(b.release)
 	return b.ReadCloser.Close()
+}
+
+type contextCauseBody struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+func (b *contextCauseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && errors.Is(context.Cause(b.ctx), ErrAdminStatusDeferred) {
+		return n, ErrAdminStatusDeferred
+	}
+	return n, err
 }
 
 type recoveryState struct {
@@ -157,6 +181,24 @@ func (c *Client) GetStatus(
 	ctx context.Context,
 	tool config.Tool,
 ) (SwitchStatus, error) {
+	return c.getStatus(ctx, tool, requestPriorityFBS)
+}
+
+// GetStatusAdmin performs a low-priority status request for the Admin UI.
+// It never waits behind another request, and an arriving FBS request can
+// cancel it so production traffic receives the device slot immediately.
+func (c *Client) GetStatusAdmin(
+	ctx context.Context,
+	tool config.Tool,
+) (SwitchStatus, error) {
+	return c.getStatus(ctx, tool, requestPriorityAdmin)
+}
+
+func (c *Client) getStatus(
+	ctx context.Context,
+	tool config.Tool,
+	priority requestPriority,
+) (SwitchStatus, error) {
 	requestURL, err := rpcURL(
 		tool,
 		"Switch.GetStatus",
@@ -178,10 +220,11 @@ func (c *Client) GetStatus(
 			c.requestTimeout,
 		)
 
-		status, err := c.getStatusOnce(
+		status, err := c.getStatusOnceWithPriority(
 			attemptCtx,
 			tool,
 			requestURL,
+			priority,
 		)
 
 		cancel()
@@ -219,14 +262,30 @@ func (c *Client) GetStatus(
 	return SwitchStatus{}, lastErr
 }
 
+// getStatusOnce remains the normal FBS-priority helper for existing callers
+// and tests. Admin refreshes use getStatusOnceWithPriority directly.
 func (c *Client) getStatusOnce(
 	ctx context.Context,
 	tool config.Tool,
 	requestURL string,
 ) (SwitchStatus, error) {
+	return c.getStatusOnceWithPriority(
+		ctx,
+		tool,
+		requestURL,
+		requestPriorityFBS,
+	)
+}
+
+func (c *Client) getStatusOnceWithPriority(
+	ctx context.Context,
+	tool config.Tool,
+	requestURL string,
+	priority requestPriority,
+) (SwitchStatus, error) {
 	var status SwitchStatus
 
-	resp, err := c.doGET(ctx, tool, requestURL)
+	resp, err := c.doGETWithPriority(ctx, tool, requestURL, priority)
 	if err != nil {
 		return status, err
 	}
@@ -427,24 +486,36 @@ func (c *Client) doGET(
 	tool config.Tool,
 	requestURL string,
 ) (*http.Response, error) {
+	return c.doGETWithPriority(
+		ctx,
+		tool,
+		requestURL,
+		requestPriorityFBS,
+	)
+}
+
+func (c *Client) doGETWithPriority(
+	ctx context.Context,
+	tool config.Tool,
+	requestURL string,
+	priority requestPriority,
+) (*http.Response, error) {
 	state := c.authState(deviceKey(tool))
 
-	if err := state.acquire(ctx); err != nil {
+	requestCtx, release, err := state.acquireRequest(ctx, priority)
+	if err != nil {
 		return nil, fmt.Errorf(
 			"wait for Shelly request slot: %w",
 			err,
 		)
 	}
 
-	var (
-		resp *http.Response
-		err  error
-	)
+	var resp *http.Response
 
 	if tool.Password == nil ||
 		strings.TrimSpace(*tool.Password) == "" {
 		resp, err = c.doUnauthenticatedGET(
-			ctx,
+			requestCtx,
 			requestURL,
 		)
 	} else {
@@ -456,7 +527,7 @@ func (c *Client) doGET(
 		}
 
 		resp, err = c.doAuthenticatedGETLocked(
-			ctx,
+			requestCtx,
 			state,
 			requestURL,
 			username,
@@ -465,12 +536,12 @@ func (c *Client) doGET(
 	}
 
 	if err != nil {
-		state.release()
-		return nil, err
+		release()
+		return nil, requestError(requestCtx, err)
 	}
 
 	if resp == nil {
-		state.release()
+		release()
 		return nil, errors.New(
 			"Shelly HTTP client returned a nil response",
 		)
@@ -480,15 +551,30 @@ func (c *Client) doGET(
 		resp.Body = http.NoBody
 	}
 
+	body := resp.Body
+	if priority == requestPriorityAdmin {
+		body = &contextCauseBody{
+			ReadCloser: body,
+			ctx:        requestCtx,
+		}
+	}
+
 	// Retain the per-device slot until the caller has finished reading and
 	// closing the response. This prevents another RPC from beginning while
 	// the preceding response is still active.
 	resp.Body = &releaseOnCloseBody{
-		ReadCloser: resp.Body,
-		release:    state.release,
+		ReadCloser: body,
+		release:    release,
 	}
 
 	return resp, nil
+}
+
+func requestError(ctx context.Context, err error) error {
+	if errors.Is(context.Cause(ctx), ErrAdminStatusDeferred) {
+		return ErrAdminStatusDeferred
+	}
+	return err
 }
 
 func (c *Client) doUnauthenticatedGET(
@@ -646,6 +732,10 @@ func (c *Client) sendGET(
 }
 
 func shouldRetryStatus(ctx context.Context, err error) bool {
+	if errors.Is(err, ErrAdminStatusDeferred) {
+		return false
+	}
+
 	if err == nil || ctx.Err() != nil {
 		return false
 	}
@@ -698,13 +788,88 @@ func newDeviceAuthState() *deviceAuthState {
 	return state
 }
 
-func (s *deviceAuthState) acquire(ctx context.Context) error {
+func (s *deviceAuthState) acquireRequest(
+	ctx context.Context,
+	priority requestPriority,
+) (context.Context, func(), error) {
+	if priority == requestPriorityAdmin {
+		return s.acquireAdmin(ctx)
+	}
+	return s.acquireFBS(ctx)
+}
+
+func (s *deviceAuthState) acquireAdmin(
+	ctx context.Context,
+) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Admin status checks are opportunistic. They never queue behind another
+	// request and never begin while production FBS traffic is waiting.
+	if s.fbsWaiters > 0 {
+		return nil, nil, ErrAdminStatusDeferred
+	}
+
 	select {
 	case <-s.gate:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	default:
+		return nil, nil, ErrAdminStatusDeferred
 	}
+
+	requestCtx, cancel := context.WithCancelCause(ctx)
+	s.activeAdminCancel = cancel
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			s.mu.Lock()
+			s.activeAdminCancel = nil
+			s.mu.Unlock()
+
+			cancel(nil)
+			s.release()
+		})
+	}
+
+	return requestCtx, release, nil
+}
+
+func (s *deviceAuthState) acquireFBS(
+	ctx context.Context,
+) (context.Context, func(), error) {
+	s.mu.Lock()
+	s.fbsWaiters++
+	cancelAdmin := s.activeAdminCancel
+	s.mu.Unlock()
+
+	if cancelAdmin != nil {
+		cancelAdmin(ErrAdminStatusDeferred)
+	}
+
+	select {
+	case <-s.gate:
+		s.mu.Lock()
+		s.fbsWaiters--
+		s.mu.Unlock()
+		return ctx, s.release, nil
+
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.fbsWaiters--
+		s.mu.Unlock()
+		return nil, nil, ctx.Err()
+	}
+}
+
+// acquire remains as the normal high-priority acquisition helper for existing
+// package callers and tests.
+func (s *deviceAuthState) acquire(ctx context.Context) error {
+	_, _, err := s.acquireFBS(ctx)
+	return err
 }
 
 func (s *deviceAuthState) release() {

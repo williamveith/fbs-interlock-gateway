@@ -1092,3 +1092,183 @@ func TestTLSClientSessionCacheIsEnabled(t *testing.T) {
 		t.Fatalf("http.Client.Timeout = %s, want 0; operation context owns the deadline", client.http.Timeout)
 	}
 }
+
+func TestFBSPreemptsActiveAdminStatus(t *testing.T) {
+	adminStarted := make(chan struct{})
+	releaseFBS := make(chan struct{})
+
+	var requests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			requestNumber := requests.Add(1)
+
+			switch requestNumber {
+			case 1:
+				close(adminStarted)
+
+				// Block until the Admin request context is canceled.
+				<-r.Context().Done()
+
+			case 2:
+				<-releaseFBS
+				fmt.Fprint(
+					w,
+					`{"id":0,"output":true}`,
+				)
+
+			default:
+				http.Error(
+					w,
+					"unexpected request",
+					http.StatusInternalServerError,
+				)
+			}
+		},
+	))
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	tool := toolForServer(server)
+
+	adminDone := make(chan error, 1)
+
+	go func() {
+		_, err := client.GetStatusAdmin(
+			context.Background(),
+			tool,
+		)
+		adminDone <- err
+	}()
+
+	select {
+	case <-adminStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Admin status request did not start")
+	}
+
+	fbsDone := make(chan error, 1)
+
+	go func() {
+		_, err := client.GetStatus(
+			context.Background(),
+			tool,
+		)
+		fbsDone <- err
+	}()
+
+	select {
+	case err := <-adminDone:
+		if !errors.Is(
+			err,
+			ErrAdminStatusDeferred,
+		) {
+			t.Fatalf(
+				"Admin error = %v, want ErrAdminStatusDeferred",
+				err,
+			)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("FBS did not preempt Admin request")
+	}
+
+	close(releaseFBS)
+
+	select {
+	case err := <-fbsDone:
+		if err != nil {
+			t.Fatalf("FBS GetStatus() error = %v", err)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("FBS request did not complete")
+	}
+
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("HTTP requests = %d, want 2", got)
+	}
+}
+
+func TestAdminStatusDoesNotWaitBehindFBS(t *testing.T) {
+	fbsStarted := make(chan struct{})
+	releaseFBS := make(chan struct{})
+
+	var requests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+
+			close(fbsStarted)
+			<-releaseFBS
+
+			fmt.Fprint(
+				w,
+				`{"id":0,"output":true}`,
+			)
+		},
+	))
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	tool := toolForServer(server)
+
+	fbsDone := make(chan error, 1)
+
+	go func() {
+		_, err := client.GetStatus(
+			context.Background(),
+			tool,
+		)
+		fbsDone <- err
+	}()
+
+	select {
+	case <-fbsStarted:
+	case <-time.After(time.Second):
+		t.Fatal("FBS request did not start")
+	}
+
+	start := time.Now()
+
+	_, err := client.GetStatusAdmin(
+		context.Background(),
+		tool,
+	)
+
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrAdminStatusDeferred) {
+		t.Fatalf(
+			"GetStatusAdmin() error = %v, want ErrAdminStatusDeferred",
+			err,
+		)
+	}
+
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf(
+			"Admin request waited %s behind FBS",
+			elapsed,
+		)
+	}
+
+	if got := requests.Load(); got != 1 {
+		t.Fatalf(
+			"HTTP requests = %d, want 1; Admin should not reach device",
+			got,
+		)
+	}
+
+	close(releaseFBS)
+
+	select {
+	case err := <-fbsDone:
+		if err != nil {
+			t.Fatalf("FBS GetStatus() error = %v", err)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatal("FBS request did not complete")
+	}
+}
