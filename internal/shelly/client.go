@@ -262,21 +262,6 @@ func (c *Client) getStatus(
 	return SwitchStatus{}, lastErr
 }
 
-// getStatusOnce remains the normal FBS-priority helper for existing callers
-// and tests. Admin refreshes use getStatusOnceWithPriority directly.
-func (c *Client) getStatusOnce(
-	ctx context.Context,
-	tool config.Tool,
-	requestURL string,
-) (SwitchStatus, error) {
-	return c.getStatusOnceWithPriority(
-		ctx,
-		tool,
-		requestURL,
-		requestPriorityFBS,
-	)
-}
-
 func (c *Client) getStatusOnceWithPriority(
 	ctx context.Context,
 	tool config.Tool,
@@ -863,13 +848,6 @@ func (s *deviceAuthState) acquireFBS(
 		s.mu.Unlock()
 		return nil, nil, ctx.Err()
 	}
-}
-
-// acquire remains as the normal high-priority acquisition helper for existing
-// package callers and tests.
-func (s *deviceAuthState) acquire(ctx context.Context) error {
-	_, _, err := s.acquireFBS(ctx)
-	return err
 }
 
 func (s *deviceAuthState) release() {
