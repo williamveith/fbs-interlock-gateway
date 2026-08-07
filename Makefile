@@ -20,12 +20,14 @@ CONFIGS := config.yaml
 CONFIG_DIR ?= /etc/$(APP)
 CONFIG_PATH ?= $(CONFIG_DIR)/$(CONFIGS)
 
-TLS_SOURCE_DIR := tls
+PKI_DIR := pki
+PKI_CA_DIR := $(PKI_DIR)/ca
+PKI_GATEWAY_DIR := $(PKI_DIR)/gateway
 TLS_DIR ?= $(CONFIG_DIR)/tls
 
-TLS_SERVER_CA_SOURCE := $(TLS_SOURCE_DIR)/server-ca.crt
-TLS_CLIENT_CERT_SOURCE := $(TLS_SOURCE_DIR)/gateway-client.crt
-TLS_CLIENT_KEY_SOURCE := $(TLS_SOURCE_DIR)/gateway-client.key
+TLS_SERVER_CA_SOURCE := $(PKI_CA_DIR)/server-ca.crt
+TLS_CLIENT_CERT_SOURCE := $(PKI_GATEWAY_DIR)/gateway-client.crt
+TLS_CLIENT_KEY_SOURCE := $(PKI_GATEWAY_DIR)/gateway-client.key
 
 TLS_SOURCE_FILES := \
 	$(TLS_SERVER_CA_SOURCE) \

@@ -1,6 +1,5 @@
 .DS_Store
 build
-/tls/
 pki
 config.yaml
 config.yaml.bak
