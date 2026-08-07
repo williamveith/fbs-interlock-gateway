@@ -109,7 +109,7 @@ TEMPLATE="${SCRIPT_DIR}/templates/shelly-server.cnf.in"
 SERVER_CA_CERT="${CA_DIR}/server-ca.crt"
 SERVER_CA_KEY="${CA_DIR}/server-ca.key"
 
-CERT_VALID_DAYS="${CERT_VALID_DAYS:-825}"
+CERT_VALID_DAYS="${CERT_VALID_DAYS:-36500}"
 
 # =========================
 # VALIDATION
@@ -241,6 +241,3 @@ echo "  $CERT_FILE"
 echo "  $KEY_FILE"
 echo "  $CSR_FILE"
 echo "  $CONFIG_FILE"
-echo
-echo "Next:"
-echo "  ./scripts/tls/upload-shelly-tls.sh"

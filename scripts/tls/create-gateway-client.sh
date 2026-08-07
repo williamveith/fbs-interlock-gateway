@@ -7,8 +7,6 @@ PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 PKI_DIR="${PROJECT_DIR}/pki"
 CA_DIR="${PKI_DIR}/ca"
 GATEWAY_DIR="${PKI_DIR}/gateway"
-RUNTIME_TLS_DIR="${PROJECT_DIR}/tls"
-
 TEMPLATE="${SCRIPT_DIR}/templates/gateway-client.cnf"
 CLIENT_CA_CERT="${CA_DIR}/client-ca.crt"
 CLIENT_CA_KEY="${CA_DIR}/client-ca.key"
@@ -18,7 +16,7 @@ CONFIG_FILE="${GATEWAY_DIR}/gateway-client.cnf"
 KEY_FILE="${GATEWAY_DIR}/gateway-client.key"
 CSR_FILE="${GATEWAY_DIR}/gateway-client.csr"
 CERT_FILE="${GATEWAY_DIR}/gateway-client.crt"
-CERT_VALID_DAYS="${CERT_VALID_DAYS:-825}"
+CERT_VALID_DAYS="${CERT_VALID_DAYS:-36500}"
 
 command -v openssl >/dev/null 2>&1 || { echo "ERROR: openssl is required."; exit 1; }
 
@@ -30,8 +28,8 @@ for required_file in "$TEMPLATE" "$CLIENT_CA_CERT" "$CLIENT_CA_KEY" "$SERVER_CA_
   fi
 done
 
-mkdir -p "$GATEWAY_DIR" "$RUNTIME_TLS_DIR"
-chmod 0700 "$GATEWAY_DIR" "$RUNTIME_TLS_DIR" 2>/dev/null || true
+mkdir -p "$GATEWAY_DIR"
+chmod 0700 "$GATEWAY_DIR" 2>/dev/null || true
 
 for output_file in "$KEY_FILE" "$CSR_FILE" "$CERT_FILE"; do
   [[ ! -e "$output_file" ]] || { echo "ERROR: Gateway output already exists: $output_file"; exit 1; }
@@ -56,17 +54,17 @@ openssl verify -purpose sslclient -CAfile "$CLIENT_CA_CERT" "$CERT_FILE"
 chmod 0600 "$KEY_FILE"
 chmod 0644 "$CERT_FILE" "$CSR_FILE" "$CONFIG_FILE"
 
-cp "$SERVER_CA_CERT" "${RUNTIME_TLS_DIR}/server-ca.crt"
-cp "$CERT_FILE" "${RUNTIME_TLS_DIR}/gateway-client.crt"
-cp "$KEY_FILE" "${RUNTIME_TLS_DIR}/gateway-client.key"
-chmod 0644 "${RUNTIME_TLS_DIR}/server-ca.crt" "${RUNTIME_TLS_DIR}/gateway-client.crt"
-chmod 0600 "${RUNTIME_TLS_DIR}/gateway-client.key"
-
 echo
-echo "Created and staged gateway runtime files:"
-echo "  ${RUNTIME_TLS_DIR}/server-ca.crt"
-echo "  ${RUNTIME_TLS_DIR}/gateway-client.crt"
-echo "  ${RUNTIME_TLS_DIR}/gateway-client.key"
+echo "Gateway client certificate created:"
+echo "  $CERT_FILE"
+echo "  $KEY_FILE"
+echo "  $CSR_FILE"
+echo "  $CONFIG_FILE"
+echo
+echo "Gateway runtime TLS files remain in the PKI directories:"
+echo "  $SERVER_CA_CERT"
+echo "  $CERT_FILE"
+echo "  $KEY_FILE"
 echo
 echo "Upload this CA certificate to every Shelly:"
 echo "  $CLIENT_CA_CERT"

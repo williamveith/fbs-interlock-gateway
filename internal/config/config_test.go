@@ -32,8 +32,8 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.Bind != "0.0.0.0" {
 		t.Fatalf("Bind = %q, want 0.0.0.0", cfg.Bind)
 	}
-	if cfg.Defaults.TimeoutMS != 800 {
-		t.Fatalf("TimeoutMS = %d, want 800", cfg.Defaults.TimeoutMS)
+	if cfg.Defaults.TimeoutMS != 3000 {
+		t.Fatalf("TimeoutMS = %d, want 3000", cfg.Defaults.TimeoutMS)
 	}
 	if cfg.Defaults.SafeStateOnError != "off" {
 		t.Fatalf("SafeStateOnError = %q, want off", cfg.Defaults.SafeStateOnError)

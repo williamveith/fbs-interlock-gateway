@@ -113,7 +113,7 @@ Before building or installing, confirm the following:
 - The repository is on the intended commit or release.
 - `make verify` completes successfully.
 - `config.yaml` contains the intended non-production or production configuration.
-- `make ca` and `make gateway-cert` have populated the repository `tls/` directory.
+- `make ca` and `make gateway-cert` have populated the required certificate material under `pki/ca/` and `pki/gateway/`.
 - The build target matches the gateway CPU architecture.
 - The configured FBS listener ports do not conflict with other services.
 - `FBS_SOURCE_IP` and `FBS_PORT_RANGE` in the Makefile are correct before building.
@@ -184,28 +184,33 @@ The installer uses the configured gateway service user and group, creating them 
 
 # Prepare Gateway TLS Material
 
-All Linux deployment builds require the gateway runtime TLS files. This keeps the deployment package ready for HTTPS or mutual-TLS Shelly communication.
+All Linux deployment builds require the gateway runtime TLS files. The canonical certificate material remains in the PKI directories; the Makefile copies only the runtime files required by the gateway into the deployment package.
 
-Generate the private certificate authorities and gateway client identity on the controlled development machine:
+Generate the certificate authorities and gateway client identity on the controlled development machine:
 
 ```bash
 make ca
 make gateway-cert
 ```
 
-The runtime files are staged under:
+The required source files are:
 
 ```text
-tls/
-├── server-ca.crt
-├── gateway-client.crt
-└── gateway-client.key
+pki/
+├── ca/
+│   └── server-ca.crt
+└── gateway/
+    ├── gateway-client.crt
+    └── gateway-client.key
 ```
 
-The Linux build copies these files into:
+The Linux build copies these files directly into:
 
 ```text
 build/linux/tls/
+├── server-ca.crt
+├── gateway-client.crt
+└── gateway-client.key
 ```
 
 Do not copy the complete `pki/` directory into the deployment package.
@@ -1096,10 +1101,13 @@ make ca
 make gateway-cert
 ```
 
-Confirm:
+Confirm the canonical runtime source files exist:
 
 ```bash
-ls -l tls/
+ls -l \
+  pki/ca/server-ca.crt \
+  pki/gateway/gateway-client.crt \
+  pki/gateway/gateway-client.key
 ```
 
 Then rebuild:

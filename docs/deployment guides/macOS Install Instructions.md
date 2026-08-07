@@ -99,7 +99,7 @@ Before building or installing, confirm the following:
 - The repository is on the intended commit or release.
 - `make verify` completes successfully.
 - `config.yaml` contains the intended non-production or production configuration.
-- `make ca` and `make gateway-cert` have populated the repository `tls/` directory.
+- `make ca` and `make gateway-cert` have populated the required certificate material under `pki/ca/` and `pki/gateway/`.
 - The selected build target matches the gateway Mac architecture.
 - The configured FBS listener ports do not conflict with other services.
 - `FBS_SOURCE_IP` and `FBS_PORT_RANGE` in the Makefile are correct before building.
@@ -123,25 +123,36 @@ com.williamveith.fbs-interlock-gateway.pf
 
 # Prepare Gateway TLS Material
 
-All Linux and macOS deployment builds now require the gateway runtime TLS files. This keeps the deployment packages consistent and ensures they are ready for HTTPS or mutual-TLS Shelly communication.
+All macOS deployment builds require the gateway runtime TLS files. The canonical certificate material remains in the PKI directories; the Makefile copies only the runtime files required by the gateway into the deployment package.
 
-Generate the private certificate authorities and gateway client identity on the controlled development machine:
+Generate the certificate authorities and gateway client identity on the controlled development machine:
 
 ```bash
 make ca
 make gateway-cert
 ```
 
-The runtime files are staged under:
+The required source files are:
 
 ```text
-tls/
+pki/
+├── ca/
+│   └── server-ca.crt
+└── gateway/
+    ├── gateway-client.crt
+    └── gateway-client.key
+```
+
+The macOS build copies these files directly into the architecture-specific deployment directory:
+
+```text
+build/darwin/<architecture>/tls/
 ├── server-ca.crt
 ├── gateway-client.crt
 └── gateway-client.key
 ```
 
-The macOS build automatically copies these three files into the architecture-specific deployment directory. Do not manually copy the complete `pki/` directory.
+Do not copy the complete `pki/` directory into the deployment package.
 
 > **Private-key handling**
 >
@@ -991,10 +1002,13 @@ make ca
 make gateway-cert
 ```
 
-Confirm:
+Confirm the canonical runtime source files exist:
 
 ```bash
-ls -l tls/
+ls -l \
+  pki/ca/server-ca.crt \
+  pki/gateway/gateway-client.crt \
+  pki/gateway/gateway-client.key
 ```
 
 Then rebuild the architecture-specific package.

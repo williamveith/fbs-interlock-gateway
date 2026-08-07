@@ -142,7 +142,7 @@ func ApplyDefaults(cfg *Config) {
 	}
 
 	if cfg.Defaults.TimeoutMS <= 0 {
-		cfg.Defaults.TimeoutMS = 800
+		cfg.Defaults.TimeoutMS = 3000
 	}
 
 	if cfg.Defaults.SafeStateOnError == "" {

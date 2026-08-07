@@ -201,7 +201,7 @@ func parseDigestChallenge(header string) map[string]string {
 }
 
 func splitDigestHeader(s string) []string {
-	var parts []string
+	parts := make([]string, 0, strings.Count(s, ",")+1)
 	var b strings.Builder
 
 	inQuote := false

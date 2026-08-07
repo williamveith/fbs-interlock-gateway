@@ -478,7 +478,7 @@ pki/ca/
 └── client-ca.key
 ```
 
-The CA script refuses to overwrite existing CA material. By default, CA certificates are valid for 3,650 days; set `CA_VALID_DAYS` to override that duration.
+The CA script refuses to overwrite existing CA material. By default, CA certificates are valid for 100 years; set `CA_VALID_DAYS` to override that duration.
 
 Generate the gateway client identity:
 
@@ -486,16 +486,7 @@ Generate the gateway client identity:
 make gateway-cert
 ```
 
-This creates the full gateway material under `pki/gateway/` and stages only the runtime files under. Gateway and Shelly leaf certificates default to 825 days; set `CERT_VALID_DAYS` to override that duration:
-
-```text
-tls/
-├── server-ca.crt
-├── gateway-client.crt
-└── gateway-client.key
-```
-
-Upload `pki/ca/client-ca.crt` to every Shelly as the CA authorized to verify the gateway client certificate.
+This creates the full gateway material under `pki/gateway/`. Gateway and Shelly leaf certificates default to 100 years; set `CERT_VALID_DAYS` to override that duration. Upload `pki/ca/client-ca.crt` to every Shelly as the CA authorized to verify the gateway client certificate.
 
 ## Generate a Shelly Server Certificate
 
@@ -522,7 +513,7 @@ pki/shellys/<interlock-name>/
 └── shelly-server.key
 ```
 
-Install the generated `shelly-server.crt` and `shelly-server.key` on the matching device. Keep all CA private keys and generated device private keys securely outside the repository.
+Install the generated `shelly-server.crt`, `shelly-server.key`, and `pki/ca/client-ca.crt` on the matching device. Keep all CA private keys and generated device private keys securely outside the repository.
 
 # Admin UI
 
@@ -914,7 +905,7 @@ make shelly-cert
 
 Deployment package builds additionally require the PDF toolchain described below because the platform Markdown guides are rendered into the build directories.
 
-The private `pki/` and staged runtime `tls/` directories are ignored by Git.
+The private `pki/` is ignored by Git.
 
 # Building Deployment Packages
 
