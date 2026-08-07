@@ -2,7 +2,7 @@
 title: "FBS Interlock Gateway"
 subtitle: "Windows Installation and Operations Guide"
 author: "William Veith"
-date: "2026-08-06"
+date: "2026-08-07"
 lang: en-US
 ---
 
@@ -14,10 +14,10 @@ lang: en-US
 >
 > The gateway controls software access signals. Hardware interlocks and fail-safe circuitry remain authoritative. The installer restricts the FBS listener range to the authorized FBS source address through Windows Defender Firewall. The Admin UI must remain bound to loopback unless remote access is intentionally secured.
 
-# Table of Contents
+## Table of Contents
 
 - [Deployment Overview](#deployment-overview)
-- [Supported Windows Architecture](#supported-windows-architecture)
+- [Supported Windows Platform and Architecture](#supported-windows-platform-and-architecture)
 - [Pre-Deployment Checklist](#pre-deployment-checklist)
 - [Prepare Gateway TLS Material](#prepare-gateway-tls-material)
 - [Build the Deployment Assets](#build-the-deployment-assets)
@@ -26,7 +26,6 @@ lang: en-US
 - [Install the Gateway](#install-the-gateway)
 - [What the Installer Does](#what-the-installer-does)
 - [Installed Layout](#installed-layout)
-- [Runtime Accounts and File Permissions](#runtime-accounts-and-file-permissions)
 - [Verify the Installation](#verify-the-installation)
 - [Verify Tool Communication](#verify-tool-communication)
 - [View the Admin Panel](#view-the-admin-panel)
@@ -46,7 +45,7 @@ lang: en-US
 The Windows deployment uses two system-wide Task Scheduler tasks:
 
 1. **FBS Interlock Gateway** starts at system boot and keeps the gateway process running.
-2. **FBS Interlock Gateway Update** checks the latest GitHub release once per hour and performs verified binary updates and gateway log maintenance.
+2. **FBS Interlock Gateway Update** checks the latest published release once per hour and performs verified binary updates and gateway log maintenance.
 
 The gateway task runs as the restricted built-in `LOCAL SERVICE` account. The update task runs as `SYSTEM` because replacing the installed executable and restarting the gateway require administrative access.
 
@@ -69,14 +68,15 @@ Normal FBS `/status`, `/on`, and `/off` requests update the Admin status cache f
 
 ## Deployment sequence
 
-1. Generate the required gateway runtime TLS files.
-2. Build the Windows amd64 deployment directory.
-3. Copy the complete deployment directory to the gateway computer.
-4. Choose production or development installation mode.
-5. Run the selected installer as an administrator.
-6. Verify the gateway task, update task, Admin API, TLS files, firewall rule, listener ports, and logs.
+1. Confirm that the gateway computer is running 64-bit Windows.
+2. Generate the required gateway runtime TLS files.
+3. Build the Windows amd64 deployment directory.
+4. Copy the complete deployment directory to the gateway computer.
+5. Choose production or development installation mode.
+6. Run the selected installer as an administrator.
+7. Verify the gateway task, update task, Admin API, TLS files, firewall rule, listener ports, tool communication, and logs.
 
-# Supported Windows Architecture
+# Supported Windows Platform and Architecture
 
 The supplied Windows deployment target is:
 
@@ -100,11 +100,15 @@ The build target is:
 make build-windows-amd64
 ```
 
-The generated directory is:
+The generated deployment directory is:
 
 ```text
 build/windows/
 ```
+
+> **Important**
+>
+> Do not mix files from Linux, macOS, or an older Windows deployment directory. Run `make clean` before preparing a fresh Windows package.
 
 # Pre-Deployment Checklist
 
@@ -113,7 +117,7 @@ Before building or installing, confirm the following:
 - The repository is on the intended commit or release.
 - `make verify` completes successfully.
 - `config.yaml` contains the intended non-production or production configuration.
-- `make ca` and `make gateway-cert` have populated the repository `tls/` directory.
+- `make ca` and `make gateway-cert` have populated the required certificate material under `pki/ca/` and `pki/gateway/`.
 - The Windows gateway is running a 64-bit version of Windows.
 - Windows PowerShell 5.1 is available.
 - The `ScheduledTasks` and `NetSecurity` PowerShell modules are available.
@@ -122,7 +126,7 @@ Before building or installing, confirm the following:
 - The Admin address remains `127.0.0.1:18090` unless a reviewed remote-access design is being used.
 - The gateway computer can resolve every configured Shelly hostname.
 - The gateway computer can reach GitHub Releases when managed automatic updates are required.
-- The deployment directory will be transferred and stored as a complete unit.
+- The complete deployment directory will be transferred and stored as one unit.
 
 Current generated firewall defaults are:
 
@@ -133,7 +137,7 @@ Gateway listener range: TCP 8081-8981
 
 # Prepare Gateway TLS Material
 
-All Linux, macOS, and Windows deployment builds require the gateway runtime TLS files. This keeps each deployment package ready for HTTPS or mutual-TLS Shelly communication.
+All Windows deployment builds require the gateway runtime TLS files. The canonical certificate material remains in the PKI directories; the Makefile copies only the runtime files required by the gateway into the deployment package.
 
 Generate the certificate authorities and gateway client identity on the controlled development machine:
 
@@ -142,26 +146,31 @@ make ca
 make gateway-cert
 ```
 
-The runtime files are staged under:
+The required source files are:
 
 ```text
-tls/
-├── server-ca.crt
-├── gateway-client.crt
-└── gateway-client.key
+pki/
+├── ca/
+│   └── server-ca.crt
+└── gateway/
+    ├── gateway-client.crt
+    └── gateway-client.key
 ```
 
-The Windows build copies these files into:
+The Windows build copies these files directly into:
 
 ```text
 build/windows/tls/
+├── server-ca.crt
+├── gateway-client.crt
+└── gateway-client.key
 ```
 
 Do not copy the complete `pki/` directory into the deployment package.
 
 > **Private-key handling**
 >
-> Never place CA private keys, certificate requests, or Shelly server private keys on the Windows gateway. Only the gateway runtime server CA certificate, gateway client certificate, and gateway client private key are packaged.
+> Never place CA private keys, certificate requests, `client-ca.crt`, or Shelly server private keys on the Windows gateway. Only the gateway runtime server CA certificate, gateway client certificate, and gateway client private key are packaged.
 
 The build fails before producing the Windows deployment directory when any required runtime TLS file is missing.
 
@@ -175,7 +184,7 @@ defaults:
     client_key_file: "./tls/gateway-client.key"
 ```
 
-The gateway task uses the configured Windows configuration directory as its working directory. With the default Makefile settings, these paths resolve under:
+The gateway task uses the configured Windows installation directory as its working directory. With the default Makefile settings, these paths resolve under:
 
 ```text
 C:\FBS\fbs-interlock-gateway\tls\
@@ -183,7 +192,7 @@ C:\FBS\fbs-interlock-gateway\tls\
 
 # Build the Deployment Assets
 
-On the development machine, run:
+On the controlled development machine, run:
 
 ```bash
 make clean
@@ -192,11 +201,11 @@ make build-windows-amd64
 
 The build performs the following Windows-specific work:
 
-- Verifies the three runtime TLS files exist.
-- Renders all Windows deployment templates.
-- Copies all matching Windows deployment guides as PDFs.
+- Verifies the three gateway runtime TLS source files exist.
+- Renders the Windows deployment templates.
+- Renders the Windows deployment guide as a PDF.
 - Copies `config.yaml`.
-- Copies the runtime TLS files.
+- Copies the required runtime TLS files from `pki/`.
 - Builds the amd64 Windows executable.
 
 The generated directory contains:
@@ -222,6 +231,10 @@ build/windows/
 
 The exact guide PDF name follows the source Markdown filename.
 
+> **Do not edit generated deployment files directly.**
+>
+> Update the source templates, deployment guide, configuration source, or Makefile variables and rebuild instead.
+
 # Transfer the Deployment Directory
 
 Copy the entire `build/windows/` directory to a USB flash drive or another approved transfer medium.
@@ -232,11 +245,11 @@ Do not copy only the executable. The complete directory is required because it c
 - The production and development launchers
 - The PowerShell installer
 - The restart supervisor
-- The automatic updater
+- The checksum-aware updater
 - The uninstaller
 - The configuration file
 - The gateway runtime TLS files
-- The deployment guide
+- The deployment guide PDF
 
 On the Windows gateway computer, copy the complete directory to a local location such as:
 
@@ -244,79 +257,76 @@ On the Windows gateway computer, copy the complete directory to a local location
 C:\Users\<username>\Downloads\windows
 ```
 
+Confirm that the complete package is present before installation.
+
 Run the installer from the local copy. Do not install directly from removable media.
+
+<div class="page-break"></div>
 
 # Choose an Installation Mode
 
+The deployment package supports two installation modes.
+
 ## Production installation
 
-Use `install.bat` for normal production deployment.
+Use the normal installer for a managed production gateway:
+
+```text
+install.bat
+```
 
 Production mode:
 
 - Installs and starts the gateway task.
 - Installs the checksum-aware updater.
 - Registers the hourly update task.
-- Preserves an existing configuration and TLS identity.
-- Enables automatic gateway log rotation during update checks.
+- Preserves an existing production configuration and installed TLS identity.
+- Performs gateway log rotation during managed maintenance.
+- Restores managed updates after a previous development installation.
 
 ## Development installation
 
-Use `install-dev.bat` when testing a locally built executable.
-
-Development mode:
-
-- Installs the local executable and normal gateway task.
-- Removes installed updater scripts.
-- Removes the managed update task.
-- Prevents an hourly release check from replacing the local development build.
-- Preserves the production configuration and TLS files.
-
-Run the normal `install.bat` later to restore managed production updates.
-
-# Install the Gateway
-
-## Production installation
-
-Open the copied Windows deployment directory.
-
-Right-click:
-
-```text
-install.bat
-```
-
-Select:
-
-```text
-Run as administrator
-```
-
-Approve the Windows User Account Control prompt.
-
-## Development installation
-
-Right-click:
+Use the development installer when testing an unpublished local build:
 
 ```text
 install-dev.bat
 ```
 
-Select:
+Development mode:
 
-```text
-Run as administrator
-```
+- Installs the local executable and normal gateway task.
+- Preserves the production configuration and installed TLS files.
+- Removes installed updater scripts.
+- Removes the managed update task.
+- Prevents the local development executable from being replaced by a published release.
 
-Approve the Windows User Account Control prompt.
+Run the normal production installer later to restore managed automatic updates.
 
-## PowerShell invocation
+# Install the Gateway
 
-The batch files are convenience launchers. The equivalent PowerShell commands are:
+Open the copied Windows deployment directory.
+
+Production installation:
+
+1. Right-click `install.bat`.
+2. Select **Run as administrator**.
+3. Approve the Windows User Account Control prompt.
+
+Development installation:
+
+1. Right-click `install-dev.bat`.
+2. Select **Run as administrator**.
+3. Approve the Windows User Account Control prompt.
+
+The batch files are convenience launchers. The equivalent production PowerShell command is:
 
 ```powershell
 Set-Location C:\Users\<username>\Downloads\windows
-PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+
+PowerShell.exe `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File .\install.ps1
 ```
 
 Development mode:
@@ -329,63 +339,29 @@ PowerShell.exe `
     -Development
 ```
 
+The installer validates the packaged executable architecture and executes its `-version` command before replacing the existing gateway.
+
+> **Reinstallation behavior**
+>
+> Reinstallation preserves the active production `config.yaml` and installed TLS files. It corrects their permissions when required but does not replace their contents.
+
 # What the Installer Does
 
-The installer performs the following actions:
+The installer performs the following operations.
 
-1. Requires administrator privileges.
-2. Verifies every required deployment file.
-3. Validates that the executable is a runnable amd64 PE binary.
-4. Captures the existing task definitions and installed executable files for rollback.
-5. Stops the existing gateway and updater tasks.
-6. Stops any remaining gateway process.
-7. Creates the installation, TLS, and log directories.
-8. Installs the executable and startup supervisor.
-9. Preserves an existing `config.yaml`.
-10. Preserves existing gateway TLS files.
-11. Installs missing TLS files from the deployment directory.
-12. Installs or removes the managed updater according to the selected mode.
-13. Applies restricted NTFS permissions.
-14. Sets Windows Defender Firewall default inbound behavior to block.
-15. Removes the older unrestricted gateway firewall rule when present.
-16. Adds a source- and port-restricted inbound firewall rule.
-17. Registers the gateway startup task under `LOCAL SERVICE`.
-18. Registers the hourly update task under `SYSTEM` in production mode.
-19. Starts the gateway.
-20. Waits for the Admin API to become ready.
-21. Rolls back the installed executable, scripts, and task definitions when installation fails after replacement.
+## Preflight validation
 
-# Installed Layout
+- Requires administrator privileges.
+- Verifies every required deployment file.
+- Validates that Windows is 64-bit.
+- Validates that the gateway executable is a runnable amd64 PE binary.
+- Executes the gateway binary's `-version` command.
+- Requires updater files when production mode is selected.
+- Captures the existing task definitions and installed executable files required for rollback.
+- Stops the existing gateway and updater tasks before replacement.
+- Stops any remaining gateway process.
 
-With the default Makefile settings, the permanent installation is:
-
-```text
-C:\FBS\fbs-interlock-gateway\
-├── fbs-interlock-gateway.exe
-├── config.yaml
-├── start.bat
-├── update.bat              # production mode only
-├── update.ps1              # production mode only
-├── tls\
-│   ├── server-ca.crt
-│   ├── gateway-client.crt
-│   └── gateway-client.key
-└── logs\
-    ├── gateway.log
-    ├── gateway-error.log
-    ├── update.log
-    └── update-error.log
-```
-
-Timestamped executable backups created by successful update attempts are stored beside the executable:
-
-```text
-fbs-interlock-gateway.exe.backup.YYYYMMDDTHHMMSSZ
-```
-
-# Runtime Accounts and File Permissions
-
-## Gateway task
+## Runtime accounts and permissions
 
 The main gateway task runs as:
 
@@ -393,78 +369,184 @@ The main gateway task runs as:
 NT AUTHORITY\LOCAL SERVICE
 ```
 
-The installer grants this account only the access needed for operation:
+The installer grants this account only the access required for operation:
 
-- Read and execute access to the executable and startup script
+- Read and execute access to the gateway executable and startup supervisor
 - Read access to `config.yaml`
-- Read access to the TLS certificate and private-key files
+- Read access to the gateway TLS certificate and private-key files
 - Modify access to the log directory
 
-## Update task
-
-The update task runs as:
+The production update task runs as:
 
 ```text
 SYSTEM
 ```
 
-Administrative execution is limited to the update workflow because it must:
+Administrative execution is limited to the maintenance workflow because it must download and verify releases, stop and start the gateway task, replace the protected executable, restore a previous executable after a failed health check, and rotate protected log files.
 
-- Download and verify a release executable
-- Stop and start the gateway task
-- Replace the protected installed executable
-- Restore the previous executable after a failed health check
-- Rotate protected log files
-
-## Administrative access
-
-The installer restricts the installation tree to:
+The installation tree is restricted to:
 
 - Local Administrators: full control
 - `SYSTEM`: full control
-- `LOCAL SERVICE`: the minimum runtime access described above
+- `LOCAL SERVICE`: minimum runtime access
 
 Other ordinary local users are not granted direct access to the gateway configuration or client private key.
+
+## Application and configuration
+
+- Creates the permanent installation directory.
+- Installs `fbs-interlock-gateway.exe`.
+- Installs the `start.bat` restart supervisor.
+- Installs updater scripts only in production mode.
+- Preserves an existing `config.yaml`.
+- Installs the packaged `config.yaml` when no active configuration exists.
+
+## Gateway TLS files
+
+- Creates the installed `tls\` directory.
+- Installs missing runtime TLS files from the deployment package.
+- Preserves existing installed TLS files during reinstallation.
+- Applies restricted NTFS permissions.
+- Grants `LOCAL SERVICE` read access to the installed runtime TLS material.
+
+## Scheduled Tasks
+
+- Registers **FBS Interlock Gateway** under `LOCAL SERVICE`.
+- Starts the gateway task after installation.
+- Registers **FBS Interlock Gateway Update** under `SYSTEM` only in production mode.
+- Removes the managed update task and updater scripts in development mode.
+- Waits for the Admin API to become healthy after starting the gateway.
+
+## Firewall controls
+
+- Sets the Windows Defender Firewall default inbound action to `Block` for Domain, Private, and Public profiles.
+- Removes the older unrestricted gateway firewall rule when present.
+- Creates a source- and port-restricted inbound allow rule for the gateway executable.
+- Restricts the generated listener range to the configured FBS source address.
+- Leaves local loopback communication available for the Admin UI and local tool-port testing.
+
+## Logs
+
+Creates:
+
+```text
+C:\FBS\fbs-interlock-gateway\logs\
+├── gateway.log
+├── gateway-error.log
+├── update.log
+└── update-error.log
+```
+
+The gateway account can modify gateway logs. The update task runs as `SYSTEM` and performs update logging and log rotation.
+
+## Rollback and health validation
+
+The installer captures the existing gateway executable, scripts, and task definitions needed for rollback before replacing an existing installation.
+
+If installation fails after replacement, the installer restores the previous managed executable and task state when possible.
+
+The preserved production configuration and installed TLS files are not replaced during normal reinstallation.
+
+# Installed Layout
+
+## Application directory
+
+With the default Makefile settings:
+
+```text
+C:\FBS\fbs-interlock-gateway\
+├── fbs-interlock-gateway.exe
+├── start.bat
+├── update.bat              # production mode only
+└── update.ps1              # production mode only
+```
+
+## Configuration and TLS
+
+```text
+C:\FBS\fbs-interlock-gateway\
+├── config.yaml
+└── tls\
+    ├── server-ca.crt
+    ├── gateway-client.crt
+    └── gateway-client.key
+```
+
+## Logs
+
+```text
+C:\FBS\fbs-interlock-gateway\logs\
+├── gateway.log
+├── gateway-error.log
+├── update.log
+└── update-error.log
+```
+
+## Scheduled Tasks
+
+Production mode registers:
+
+```text
+FBS Interlock Gateway
+FBS Interlock Gateway Update
+```
+
+A development installation does not retain the managed update task.
+
+Timestamped executable backups created by successful update attempts are stored beside the executable:
+
+```text
+fbs-interlock-gateway.exe.backup.YYYYMMDDTHHMMSSZ
+```
+
+<div class="page-break"></div>
 
 # Verify the Installation
 
 Open PowerShell as an administrator.
 
-## Verify the gateway task
+## Check the installed version
 
 ```powershell
-Get-ScheduledTask -TaskName "FBS Interlock Gateway"
+& "C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe" `
+    -version
 ```
 
-Expected state while the gateway is running:
+## Check the gateway task
 
-```text
-Running
+```powershell
+Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
 ```
 
 View detailed task information:
 
 ```powershell
-Get-ScheduledTaskInfo -TaskName "FBS Interlock Gateway"
+Get-ScheduledTaskInfo `
+    -TaskName "FBS Interlock Gateway"
 ```
 
 Confirm the runtime account:
 
 ```powershell
-(Get-ScheduledTask -TaskName "FBS Interlock Gateway").Principal
+(Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway").Principal
 ```
 
 The user ID should resolve to `LOCAL SERVICE`.
 
-## Verify the update task
+While the gateway executable is active, the task should report a running state.
+
+## Check the update task
 
 Production installation:
 
 ```powershell
-Get-ScheduledTask -TaskName "FBS Interlock Gateway Update"
+Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway Update"
 ```
 
-Development installation should not have this task:
+A development installation should not have this task:
 
 ```powershell
 Get-ScheduledTask `
@@ -472,25 +554,77 @@ Get-ScheduledTask `
     -ErrorAction SilentlyContinue
 ```
 
-## Verify the executable version
+## Check the Admin API
+
+Read the current in-memory status snapshot:
 
 ```powershell
-& "C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe" -version
+Invoke-WebRequest `
+    -UseBasicParsing `
+    http://127.0.0.1:18090/api/status
 ```
 
-## Verify the Admin API
+A successful response should report HTTP status `200`.
+
+Start an explicit fleet refresh:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:18090/api/status
+Invoke-WebRequest `
+    -UseBasicParsing `
+    "http://127.0.0.1:18090/api/status?refresh=1"
 ```
 
-## Verify installed TLS files
+The response headers expose the current refresh state through:
+
+```text
+X-Status-Refresh-In-Progress
+```
+
+## Confirm listening ports
+
+Admin port:
 
 ```powershell
-Get-ChildItem C:\FBS\fbs-interlock-gateway\tls
+Get-NetTCPConnection `
+    -LocalPort 18090 `
+    -State Listen `
+    -ErrorAction SilentlyContinue
 ```
 
-Expected files:
+Example FBS listener port:
+
+```powershell
+Get-NetTCPConnection `
+    -LocalPort 8081 `
+    -State Listen `
+    -ErrorAction SilentlyContinue
+```
+
+Display the complete configured gateway range:
+
+```powershell
+Get-NetTCPConnection `
+    -State Listen `
+    -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.LocalPort -eq 18090 -or
+        ($_.LocalPort -ge 8081 -and $_.LocalPort -le 8981)
+    } |
+    Sort-Object LocalPort
+```
+
+## Verify configuration and TLS permissions
+
+Confirm the required files exist:
+
+```powershell
+Get-Item C:\FBS\fbs-interlock-gateway\config.yaml
+
+Get-ChildItem `
+    C:\FBS\fbs-interlock-gateway\tls
+```
+
+Expected TLS files:
 
 ```text
 server-ca.crt
@@ -506,74 +640,166 @@ Get-Acl `
     Format-List
 ```
 
-## Verify listening ports
+The ACL should retain access for Administrators and `SYSTEM`, with the runtime read access required by `LOCAL SERVICE`.
+
+## Verify Windows Defender Firewall
+
+Inspect the managed rule:
 
 ```powershell
-Get-NetTCPConnection `
-    -State Listen `
-    -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.LocalPort -eq 18090 -or
-        ($_.LocalPort -ge 8081 -and $_.LocalPort -le 8981)
-    } |
-    Sort-Object LocalPort
+Get-NetFirewallRule `
+    -DisplayName "FBS Interlock Gateway - Authorized FBS Source" |
+    Format-List
 ```
+
+Inspect the port filter:
+
+```powershell
+Get-NetFirewallRule `
+    -DisplayName "FBS Interlock Gateway - Authorized FBS Source" |
+    Get-NetFirewallPortFilter |
+    Format-List
+```
+
+Inspect the remote-address filter:
+
+```powershell
+Get-NetFirewallRule `
+    -DisplayName "FBS Interlock Gateway - Authorized FBS Source" |
+    Get-NetFirewallAddressFilter |
+    Format-List
+```
+
+Confirm that the generated rule restricts inbound TCP traffic to the configured listener range and authorized FBS source.
 
 # Verify Tool Communication
 
 Replace `8081` with the configured listener port for the tool being tested.
 
-Check status:
+Read the tool status:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8081/status
+Invoke-RestMethod `
+    http://127.0.0.1:8081/status
 ```
 
-Turn the interlock on:
+Turn the tool output on:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8081/on
+Invoke-RestMethod `
+    http://127.0.0.1:8081/on
 ```
 
-Turn the interlock off:
+Turn the tool output off:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8081/off
+Invoke-RestMethod `
+    http://127.0.0.1:8081/off
 ```
 
-Use `/on` and `/off` only when it is operationally safe to change the tool state.
+Expected FBS-compatible responses include:
 
-For an HTTPS or mutual-TLS Shelly configuration, review `gateway-error.log` for certificate, hostname, or trust-chain failures.
+```json
+{"Success":1,"State":1}
+```
+
+and:
+
+```json
+{"Success":1,"State":0}
+```
+
+> **Operational caution**
+>
+> `/on` and `/off` operate the configured interlock. Perform command testing only when changing the interlock state is authorized and safe.
+
+## Verify HTTPS or mutual TLS directly
+
+For an HTTPS or mutual-TLS Shelly configuration, first confirm that the gateway can resolve and reach the Shelly hostname:
+
+```powershell
+Resolve-DnsName <shelly-ddns-host>
+
+Test-NetConnection `
+    <shelly-ddns-host> `
+    -Port 443
+```
+
+Then initiate a normal gateway status request for that tool and review the gateway error log for certificate, hostname, trust-chain, or client-certificate failures:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
+    -Tail 100
+```
+
+A successful gateway `/status` request without a corresponding TLS error validates the installed runtime trust path in the same process that communicates with the Shelly.
 
 # View the Admin Panel
 
-On the gateway machine, open the following address in a web browser:
+On the gateway machine, open:
 
 <http://127.0.0.1:18090>
 
-The Admin status API is:
+The Admin UI provides:
+
+- Current cached status for every configured tool
+- Connected, disconnected, output, protocol, and error information
+- Passive row updates from normal FBS traffic
+- A **Refresh Status** button for explicit fleet verification
+- Configuration editing and validation
+- Password replacement or clearing without exposing stored passwords
+- A gateway restart after a successful configuration save
+
+## Passive status behavior
+
+The browser polls only the gateway's in-memory status cache every three seconds. These cache reads do not contact Shelly devices.
 
 ```text
-http://127.0.0.1:18090/api/status
+FBS request
+    -> Shelly operation
+    -> shared status row updated
+    -> Admin browser reads cache
 ```
 
-The Admin UI is intentionally local. Do not change it to a non-loopback bind address without a reviewed authentication, authorization, firewall, and transport-security design.
+Use **Refresh Status** when an independent `Switch.GetStatus` check is required.
+
+An explicit refresh performs the fleet verification through the gateway rather than through the browser directly.
+
+## Remote Admin access
+
+Keep the Admin UI bound to loopback.
+
+Do not expose port `18090` through Windows Defender Firewall without a reviewed authentication, authorization, and transport-security design.
+
+If Windows OpenSSH Server is intentionally configured for administrative access, use an SSH tunnel from an authorized computer rather than changing the Admin bind address:
+
+```bash
+ssh -L 18090:127.0.0.1:18090 \
+  <windows-user>@<gateway-host>
+```
+
+Then open locally:
+
+```text
+http://127.0.0.1:18090
+```
 
 # Automatic Updates and Log Maintenance
 
-The production installer creates:
+Production installation creates:
 
 ```text
 FBS Interlock Gateway Update
 ```
 
-The task starts at minute 17 and repeats once per hour.
+The task starts at minute `17` and repeats once per hour.
 
-## Update sequence
+## Update behavior
 
-Each run performs the following sequence:
+The updater:
 
-1. Requires administrative execution.
+1. Requires administrative execution through the `SYSTEM` update task.
 2. Acquires an update lock to prevent overlapping update operations.
 3. Downloads the latest published SHA-256 checksum first.
 4. Calculates the installed executable SHA-256 checksum.
@@ -584,35 +810,19 @@ Each run performs the following sequence:
 9. Verifies that the download is a valid amd64 PE executable.
 10. Runs the downloaded executable with `-version`.
 11. Backs up the current executable.
-12. Stops the gateway task.
+12. Stops the gateway task only when replacement or log maintenance requires it.
 13. Rotates oversized gateway logs.
 14. Stages and verifies the replacement executable.
 15. Starts the gateway task.
 16. Waits for the Admin API health check.
 17. Restores the previous executable when the health check fails.
 
-The updater modifies only the application executable and gateway logs. It does not replace:
+The updater modifies only the application executable and gateway log files. It does not replace:
 
 - `config.yaml`
 - `server-ca.crt`
 - `gateway-client.crt`
 - `gateway-client.key`
-
-## Run an update check manually
-
-Open PowerShell as an administrator:
-
-```powershell
-Start-ScheduledTask -TaskName "FBS Interlock Gateway Update"
-```
-
-Follow the updater logs:
-
-```powershell
-Get-Content `
-    C:\FBS\fbs-interlock-gateway\logs\update.log `
-    -Wait
-```
 
 ## Log rotation
 
@@ -623,7 +833,7 @@ gateway.log
 gateway-error.log
 ```
 
-A log is rotated after it reaches 10 MiB.
+A log is rotated after it reaches `10 MiB`.
 
 The updater retains up to 30 compressed archives:
 
@@ -634,27 +844,18 @@ gateway.log.2.zip
 gateway.log.30.zip
 ```
 
-The same pattern applies to `gateway-error.log`.
+The same retention pattern applies to `gateway-error.log`.
 
-# View Gateway Logs
+## Run maintenance manually
 
-## Standard output
-
-```powershell
-Get-Content `
-    C:\FBS\fbs-interlock-gateway\logs\gateway.log `
-    -Wait
-```
-
-## Standard error
+Open PowerShell as an administrator:
 
 ```powershell
-Get-Content `
-    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
-    -Wait
+Start-ScheduledTask `
+    -TaskName "FBS Interlock Gateway Update"
 ```
 
-## Update output
+Follow the updater log:
 
 ```powershell
 Get-Content `
@@ -662,7 +863,51 @@ Get-Content `
     -Wait
 ```
 
-## Update errors
+## Disable managed updates for development
+
+Use the packaged development installer:
+
+```text
+Right-click install-dev.bat -> Run as administrator
+```
+
+The development installer removes the update task and installed updater scripts.
+
+## Restore managed updates
+
+Run the normal production installer:
+
+```text
+Right-click install.bat -> Run as administrator
+```
+
+# View Gateway Logs
+
+Follow gateway standard output:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\gateway.log `
+    -Wait
+```
+
+Follow gateway errors:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
+    -Wait
+```
+
+Follow updater output:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\update.log `
+    -Wait
+```
+
+Follow updater errors:
 
 ```powershell
 Get-Content `
@@ -674,11 +919,23 @@ Press `Ctrl+C` to stop following a log.
 
 # Edit the Configuration
 
-The active configuration file is:
+The active configuration is:
 
 ```text
 C:\FBS\fbs-interlock-gateway\config.yaml
 ```
+
+## Preferred method: Admin UI
+
+Open:
+
+```text
+http://127.0.0.1:18090
+```
+
+The Admin UI validates fields, preserves stored passwords unless explicitly replaced or cleared, writes the configuration safely, and requests a clean gateway restart after a successful save.
+
+## Manual method
 
 Run the editor as an administrator because ordinary users do not have write access to the protected configuration.
 
@@ -690,26 +947,54 @@ Start-Process notepad.exe `
     -Verb RunAs
 ```
 
-An existing production configuration is preserved when either installer mode is run again.
+Recommended TLS paths are relative to the installation directory:
 
-After editing `config.yaml`, restart the gateway task.
+```yaml
+defaults:
+  shelly_tls:
+    server_ca_file: "./tls/server-ca.crt"
+    client_cert_file: "./tls/gateway-client.crt"
+    client_key_file: "./tls/gateway-client.key"
+
+tools:
+  - interlock_name: "EQU-EXAMPLE-TOOL-01"
+    ip: "2c41389b0d77.dynamic.utexas.edu"
+    protocol: "https"
+    port: 8081
+    switch_id: 0
+    username: "admin"
+    password: "example-password"
+    enabled: true
+```
+
+The gateway task uses the installation directory as its working directory. The gateway also resolves relative TLS paths against the directory containing the loaded configuration.
+
+Restart the gateway after manually editing the configuration.
+
+> **Configuration rule**
+>
+> `tools[].ip` must contain only the hostname or IP address. Do not include `http://`, `https://`, a path, or a port.
 
 # Restart the Gateway
 
 Open PowerShell as an administrator:
 
 ```powershell
-Stop-ScheduledTask -TaskName "FBS Interlock Gateway"
-Start-ScheduledTask -TaskName "FBS Interlock Gateway"
+Stop-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
+
+Start-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
 ```
 
 Verify the Admin API:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:18090/api/status
+Invoke-RestMethod `
+    http://127.0.0.1:18090/api/status
 ```
 
-The `start.bat` supervisor provides behavior equivalent to the Linux and macOS restart policy:
+The `start.bat` supervisor provides bounded restart behavior around the gateway executable:
 
 - Restart delay: 2 seconds
 - Restart window: 60 seconds
@@ -720,9 +1005,9 @@ Task Scheduler also provides a slower fallback restart policy if the supervisor 
 
 # Firewall Behavior
 
-The installer sets the default inbound action to `Block` for the Domain, Private, and Public firewall profiles.
+The installer sets the default inbound action to `Block` for the Domain, Private, and Public Windows Defender Firewall profiles.
 
-It then creates this application-specific allow rule:
+It creates this application-specific allow rule:
 
 ```text
 Display name: FBS Interlock Gateway - Authorized FBS Source
@@ -766,18 +1051,27 @@ Get-NetFirewallRule `
     Format-List
 ```
 
-Local loopback access remains available for Admin UI and local tool-port testing.
+Local loopback access remains available for the Admin UI and local tool-port testing.
+
+<div class="page-break"></div>
 
 # Troubleshooting
 
-## Installer reports a missing TLS file
+## Build fails because TLS files are missing
 
 Confirm the development repository contains:
 
 ```text
-tls/server-ca.crt
-tls/gateway-client.crt
-tls/gateway-client.key
+pki/ca/server-ca.crt
+pki/gateway/gateway-client.crt
+pki/gateway/gateway-client.key
+```
+
+If the PKI has not been created, generate it:
+
+```bash
+make ca
+make gateway-cert
 ```
 
 Then rebuild:
@@ -787,55 +1081,72 @@ make clean
 make build-windows-amd64
 ```
 
-Do not manually bypass the TLS build check by copying an incomplete deployment directory.
+Do not bypass the build check by manually assembling an incomplete deployment directory.
 
-## Installer reports the executable is not amd64
+## The executable architecture does not match the gateway
 
 Rebuild with:
 
 ```bash
+make clean
 make build-windows-amd64
 ```
 
 Confirm the deployment directory was not mixed with a Linux or macOS binary.
 
-## The gateway task is Ready instead of Running
+## The gateway task is not running
 
-Inspect task history and logs:
+Inspect task state and history:
 
 ```powershell
-Get-ScheduledTaskInfo -TaskName "FBS Interlock Gateway"
+Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
+
+Get-ScheduledTaskInfo `
+    -TaskName "FBS Interlock Gateway"
+```
+
+Review the gateway error log:
+
+```powershell
 Get-Content `
     C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
     -Tail 100
 ```
 
-Start it manually:
+Start the task manually:
 
 ```powershell
-Start-ScheduledTask -TaskName "FBS Interlock Gateway"
+Start-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
 ```
+
+A task that returns to `Ready` immediately may indicate that the supervisor or gateway executable exited. Review the logs before repeatedly restarting it.
 
 ## The Admin API does not respond
 
 Check whether the gateway task is running:
 
 ```powershell
-Get-ScheduledTask -TaskName "FBS Interlock Gateway"
-```
-
-Check the logs:
-
-```powershell
-Get-Content `
-    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
-    -Tail 100
+Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
 ```
 
 Confirm port `18090` is listening:
 
 ```powershell
-Get-NetTCPConnection -LocalPort 18090 -State Listen
+Get-NetTCPConnection `
+    -LocalPort 18090 `
+    -State Listen `
+    -ErrorAction SilentlyContinue
+```
+
+Review:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
+    -Tail 100
 ```
 
 ## A tool listener does not respond
@@ -843,50 +1154,40 @@ Get-NetTCPConnection -LocalPort 18090 -State Listen
 Confirm the configured listener port is open locally:
 
 ```powershell
-Test-NetConnection 127.0.0.1 -Port 8081
+Test-NetConnection `
+    127.0.0.1 `
+    -Port 8081
 ```
 
 Check the exact tool entry in `config.yaml` and review gateway logs for hostname resolution, authentication, timeout, TLS, or certificate errors.
 
-## The gateway cannot read TLS files
+## The gateway cannot read the configuration or TLS files
 
 Inspect the ACLs:
 
 ```powershell
-Get-Acl C:\FBS\fbs-interlock-gateway\tls\gateway-client.key |
+Get-Acl `
+    C:\FBS\fbs-interlock-gateway\config.yaml |
+    Format-List
+
+Get-Acl `
+    C:\FBS\fbs-interlock-gateway\tls\gateway-client.key |
     Format-List
 ```
 
 Re-run `install.bat` as administrator to restore the intended permissions without replacing an existing configuration or TLS identity.
 
-## The update task reports a checksum mismatch
+## The Windows Defender Firewall rule is missing or incorrect
 
-Do not install the downloaded file manually.
+Inspect the rule:
 
-Review:
-
-```text
-C:\FBS\fbs-interlock-gateway\logs\update-error.log
+```powershell
+Get-NetFirewallRule `
+    -DisplayName "FBS Interlock Gateway - Authorized FBS Source" `
+    -ErrorAction SilentlyContinue
 ```
 
-A checksum mismatch causes the updater to stop before replacing the installed executable.
-
-## The update is rolled back
-
-The updater rolls back when the Admin API does not become healthy after replacement.
-
-Review both:
-
-```text
-logs\update-error.log
-logs\gateway-error.log
-```
-
-The timestamped backup executable remains in the installation directory for inspection.
-
-## Windows Firewall blocks expected FBS traffic
-
-Confirm the source address used by FBS matches the generated rule:
+Confirm the source address:
 
 ```powershell
 Get-NetFirewallRule `
@@ -894,7 +1195,7 @@ Get-NetFirewallRule `
     Get-NetFirewallAddressFilter
 ```
 
-Confirm the local port is within the generated range:
+Confirm the listener range:
 
 ```powershell
 Get-NetFirewallRule `
@@ -904,9 +1205,127 @@ Get-NetFirewallRule `
 
 Rebuild and reinstall after changing `FBS_SOURCE_IP` or `FBS_PORT_RANGE` in the Makefile.
 
+## The update task is absent
+
+A development installation intentionally removes the managed update task.
+
+For production mode, check:
+
+```powershell
+Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway Update" `
+    -ErrorAction SilentlyContinue
+```
+
+Run the normal production installer again to restore managed updates.
+
+## The updater reports a checksum or download failure
+
+Do not install the downloaded file manually.
+
+Review:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\update-error.log `
+    -Tail 100
+```
+
+A checksum mismatch causes the updater to stop before replacing the installed executable.
+
+Also confirm that the gateway computer can reach the published GitHub release assets.
+
+## The update is rolled back
+
+The updater restores the previous executable when the Admin API does not become healthy after replacement.
+
+Review:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\update-error.log `
+    -Tail 100
+
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
+    -Tail 100
+```
+
+Timestamped backup executables remain in the installation directory for inspection.
+
+## A Shelly hostname does not resolve
+
+Test the configured hostname:
+
+```powershell
+Resolve-DnsName `
+    2c41389b0d77.dynamic.utexas.edu
+```
+
+Test HTTPS reachability:
+
+```powershell
+Test-NetConnection `
+    2c41389b0d77.dynamic.utexas.edu `
+    -Port 443
+```
+
+The `tools[].ip` field must contain only the hostname or IP address.
+
+## HTTPS or mutual TLS fails
+
+Confirm the installed TLS files exist:
+
+```powershell
+Get-ChildItem `
+    C:\FBS\fbs-interlock-gateway\tls
+```
+
+Check the gateway error log for:
+
+- Certificate expiration
+- Hostname mismatch
+- Unknown certificate authority
+- Client-certificate rejection
+- TLS handshake timeout
+- Incorrect Shelly hostname
+
+Confirm that the Shelly server certificate is signed by the server CA installed on the gateway and that the Shelly trusts the client CA that signed `gateway-client.crt`.
+
+## A request reaches its context deadline
+
+Review gateway errors:
+
+```powershell
+Get-Content `
+    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
+    -Tail 100
+```
+
+Confirm:
+
+- The Shelly hostname resolves quickly.
+- Port `443` is reachable when HTTPS is configured.
+- Authentication credentials are correct.
+- The TLS handshake is not failing or repeatedly retrying.
+- The configured request timeout is appropriate for the deployment.
+
+## Admin status appears stale
+
+Normal browser polling reads the in-memory status cache and does not force a Shelly request.
+
+Use **Refresh Status** in the Admin UI when an independent fleet verification is required.
+
+You can also request a refresh directly:
+
+```powershell
+Invoke-RestMethod `
+    "http://127.0.0.1:18090/api/status?refresh=1"
+```
+
 # Uninstall the Gateway
 
-The normal uninstaller removes managed executable files and operating-system integration while preserving persistent gateway data.
+The uninstaller removes managed executable files and operating-system integration while preserving persistent gateway data by default.
 
 ## Standard uninstall
 
@@ -924,7 +1343,7 @@ Select:
 Run as administrator
 ```
 
-The standard uninstaller removes:
+Standard uninstall removes:
 
 - Gateway task
 - Update task
@@ -937,18 +1356,20 @@ The standard uninstaller removes:
 
 It preserves:
 
-- `config.yaml`
-- `tls\`
-- `logs\`
+```text
+C:\FBS\fbs-interlock-gateway\config.yaml
+C:\FBS\fbs-interlock-gateway\tls\
+C:\FBS\fbs-interlock-gateway\logs\
+```
 
-## Purge uninstall
+## Purge persistent configuration and TLS
 
 A purge also removes the configuration, TLS files, and logs.
 
 Open an elevated Command Prompt in the deployment directory:
 
 ```bat
-./uninstall.bat --purge
+uninstall.bat --purge
 ```
 
 Equivalent PowerShell command:
@@ -961,101 +1382,46 @@ PowerShell.exe `
     -Purge
 ```
 
-> **Warning**
+> **Destructive operation**
 >
-> A purge deletes the installed gateway client private key and local logs. Confirm that the required certificate material is backed up before using it.
+> Purge deletes the installed gateway client private key and local logs. Confirm that required configuration, certificate, and log retention requirements have been satisfied before using it.
+
+Verify that the managed tasks were removed:
+
+```powershell
+Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway" `
+    -ErrorAction SilentlyContinue
+
+Get-ScheduledTask `
+    -TaskName "FBS Interlock Gateway Update" `
+    -ErrorAction SilentlyContinue
+```
+
+No matching tasks should remain after a successful uninstall.
 
 # Command Reference
 
-## Build
+| Task | Command |
+| --- | --- |
+| Generate gateway TLS material | `make ca && make gateway-cert` |
+| Build Windows package | `make clean && make build-windows-amd64` |
+| Production install | Right-click `install.bat` -> **Run as administrator** |
+| Development install | Right-click `install-dev.bat` -> **Run as administrator** |
+| Check gateway task | `Get-ScheduledTask -TaskName "FBS Interlock Gateway"` |
+| Check updater task | `Get-ScheduledTask -TaskName "FBS Interlock Gateway Update"` |
+| Restart gateway | `Stop-ScheduledTask -TaskName "FBS Interlock Gateway"; Start-ScheduledTask -TaskName "FBS Interlock Gateway"` |
+| Run updater manually | `Start-ScheduledTask -TaskName "FBS Interlock Gateway Update"` |
+| Read Admin cache | `Invoke-RestMethod http://127.0.0.1:18090/api/status` |
+| Refresh all tools | `Invoke-RestMethod "http://127.0.0.1:18090/api/status?refresh=1"` |
+| Show firewall rule | `Get-NetFirewallRule -DisplayName "FBS Interlock Gateway - Authorized FBS Source"` |
+| Follow gateway logs | `Get-Content C:\FBS\fbs-interlock-gateway\logs\gateway.log -Wait` |
+| Follow gateway errors | `Get-Content C:\FBS\fbs-interlock-gateway\logs\gateway-error.log -Wait` |
+| Follow update logs | `Get-Content C:\FBS\fbs-interlock-gateway\logs\update.log -Wait` |
+| Edit config | `Start-Process notepad.exe -ArgumentList "C:\FBS\fbs-interlock-gateway\config.yaml" -Verb RunAs` |
+| Standard uninstall | Right-click `uninstall.bat` -> **Run as administrator** |
+| Purge uninstall | `uninstall.bat --purge` |
 
-```bash
-make clean
-make build-windows-amd64
-```
+---
 
-## Production install
-
-```text
-Right-click install.bat -> Run as administrator
-```
-
-## Development install
-
-```text
-Right-click install-dev.bat -> Run as administrator
-```
-
-## Gateway task status
-
-```powershell
-Get-ScheduledTask -TaskName "FBS Interlock Gateway"
-Get-ScheduledTaskInfo -TaskName "FBS Interlock Gateway"
-```
-
-## Update task status
-
-```powershell
-Get-ScheduledTask -TaskName "FBS Interlock Gateway Update"
-Get-ScheduledTaskInfo -TaskName "FBS Interlock Gateway Update"
-```
-
-## Restart gateway
-
-```powershell
-Stop-ScheduledTask -TaskName "FBS Interlock Gateway"
-Start-ScheduledTask -TaskName "FBS Interlock Gateway"
-```
-
-## Run update check
-
-```powershell
-Start-ScheduledTask -TaskName "FBS Interlock Gateway Update"
-```
-
-## Admin API
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:18090/api/status
-```
-
-## Tool status
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8081/status
-```
-
-## Follow gateway logs
-
-```powershell
-Get-Content `
-    C:\FBS\fbs-interlock-gateway\logs\gateway.log `
-    -Wait
-```
-
-## Follow gateway errors
-
-```powershell
-Get-Content `
-    C:\FBS\fbs-interlock-gateway\logs\gateway-error.log `
-    -Wait
-```
-
-## View firewall rule
-
-```powershell
-Get-NetFirewallRule `
-    -DisplayName "FBS Interlock Gateway - Authorized FBS Source"
-```
-
-## Standard uninstall
-
-```text
-Right-click uninstall.bat -> Run as administrator
-```
-
-## Purge uninstall
-
-```bat
-uninstall.bat --purge
-```
+**FBS Interlock Gateway - Windows Installation and Operations Guide**

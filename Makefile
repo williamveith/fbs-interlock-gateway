@@ -57,6 +57,7 @@ PDF_MARGIN ?= 0.3in
 PDF_FONT_SIZE ?= 12pt
 PDF_MAIN_FONT ?= IBMPlexMono-Regular
 PDF_MONO_FONT ?= IBMPlexMono-Regular
+PANDOC_INLINE_CODE_FILTER ?= scripts/pandoc/wrap-inline-code.lua
 
 # =========================
 # LINUX SERVICE CONFIGS
@@ -515,35 +516,37 @@ macos-deployment-files: \
 # DEPLOYMENT GUIDE PDFS
 # =========================
 
-# Render every Markdown guide matching $(2) into $(1). The find/sh approach is
-# intentional: the source directory and guide filenames contain spaces, which
-# are not safe to enumerate with Make's wildcard/patsubst functions.
 define build_deployment_guides
 set -eu; \
 command -v "$(PANDOC)" >/dev/null 2>&1 || { \
-	echo "ERROR: $(PANDOC) is required to build deployment guide PDFs."; \
-	exit 1; \
+    echo "ERROR: $(PANDOC) is required to build deployment guide PDFs."; \
+    exit 1; \
 }; \
 command -v "$(PDF_ENGINE)" >/dev/null 2>&1 || { \
-	echo "ERROR: $(PDF_ENGINE) is required to build deployment guide PDFs."; \
-	exit 1; \
+    echo "ERROR: $(PDF_ENGINE) is required to build deployment guide PDFs."; \
+    exit 1; \
+}; \
+[ -f "$(PANDOC_INLINE_CODE_FILTER)" ] || { \
+    echo "ERROR: Missing Pandoc inline-code filter: $(PANDOC_INLINE_CODE_FILTER)"; \
+    exit 1; \
 }; \
 mkdir -p "$(1)"; \
 if ! find "$(DEPLOYMENT_GUIDES_DIR)" -maxdepth 1 -type f -name '$(2)' \
-	-print -quit | grep -q .; then \
-	echo "ERROR: No deployment guides matched $(DEPLOYMENT_GUIDES_DIR)/$(2)"; \
-	exit 1; \
+    -print -quit | grep -q .; then \
+    echo "ERROR: No deployment guides matched $(DEPLOYMENT_GUIDES_DIR)/$(2)"; \
+    exit 1; \
 fi; \
 find "$(DEPLOYMENT_GUIDES_DIR)" -maxdepth 1 -type f -name '$(2)' \
-	-exec sh -c '\
-		out_dir=$$1; \
-		shift; \
-		for guide in "$$@"; do \
-			pdf_name=$$(basename "$$guide" .md).pdf; \
-			echo "Rendering $$guide -> $$out_dir/$$pdf_name"; \
-			"$(PANDOC)" "$$guide" \
+    -exec sh -c '\
+        out_dir=$$1; \
+        shift; \
+        for guide in "$$@"; do \
+            pdf_name=$$(basename "$$guide" .md).pdf; \
+            echo "Rendering $$guide -> $$out_dir/$$pdf_name"; \
+            "$(PANDOC)" "$$guide" \
 				-o "$$out_dir/$$pdf_name" \
 				--pdf-engine="$(PDF_ENGINE)" \
+				--lua-filter="$(PANDOC_INLINE_CODE_FILTER)" \
 				-V geometry:margin="$(PDF_MARGIN)" \
 				-V fontsize="$(PDF_FONT_SIZE)" \
 				-V mainfont="$(PDF_MAIN_FONT)" \
@@ -551,12 +554,14 @@ find "$(DEPLOYMENT_GUIDES_DIR)" -maxdepth 1 -type f -name '$(2)' \
 				-V colorlinks=true \
 				-V linkcolor=blue \
 				-V urlcolor=blue \
+				-V "header-includes=\usepackage{fvextra}" \
+				-V "header-includes=\fvset{breaklines=true,breakanywhere=true}" \
 				-V "header-includes=\setlength{\parindent}{0pt}" \
 				-V "header-includes=\setlength{\parskip}{0.6em}" \
 				-V "header-includes=\setlength{\emergencystretch}{3em}" \
 				-V "header-includes=\raggedbottom"; \
-		done \
-	' sh "$(1)" {} +
+        done \
+    ' sh "$(1)" {} +
 endef
 
 linux-deployment-guides:
