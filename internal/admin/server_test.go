@@ -106,7 +106,7 @@ func TestHandleConfigGet(t *testing.T) {
 	stored := config.Config{
 		Bind: "127.0.0.1",
 		Defaults: config.Defaults{
-			TimeoutMS:        800,
+			TimeoutMS:        3000,
 			SafeStateOnError: "off",
 			ShellyTLS: config.ShellyTLSConfig{
 				ServerCAFile:   "/etc/fbs-interlock-gateway/tls/server-ca.crt",

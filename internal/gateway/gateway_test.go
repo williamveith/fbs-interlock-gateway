@@ -24,7 +24,7 @@ func testConfig(safeState string) config.Config {
 	return config.Config{
 		Bind: "127.0.0.1",
 		Defaults: config.Defaults{
-			TimeoutMS:        800,
+			TimeoutMS:        3000,
 			SafeStateOnError: safeState,
 		},
 		Tools: []config.Tool{
@@ -51,9 +51,9 @@ func TestNewAppliesDefaults(t *testing.T) {
 		)
 	}
 
-	if snapshot.Defaults.TimeoutMS != 800 {
+	if snapshot.Defaults.TimeoutMS != 3000 {
 		t.Fatalf(
-			"expected default timeout 800, got %d",
+			"expected default timeout 3000, got %d",
 			snapshot.Defaults.TimeoutMS,
 		)
 	}
@@ -144,9 +144,9 @@ func TestUpdateConfigWritesFileAndUpdatesState(t *testing.T) {
 		)
 	}
 
-	if snapshot.Defaults.TimeoutMS != 800 {
+	if snapshot.Defaults.TimeoutMS != 3000 {
 		t.Fatalf(
-			"expected default timeout 800, got %d",
+			"expected default timeout 3000, got %d",
 			snapshot.Defaults.TimeoutMS,
 		)
 	}
