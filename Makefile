@@ -589,7 +589,7 @@ init-config:
 			'bind: 0.0.0.0' \
 			'' \
 			'defaults:' \
-			'  timeout_ms: 3000' \
+			'  timeout_ms: 5000' \
 			'  safe_state_on_error: "off"' \
 			'  shelly_tls:' \
 			'    server_ca_file: "./tls/server-ca.crt"' \
