@@ -143,6 +143,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/restart", s.handleRestart)
@@ -206,6 +207,32 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (s *Server) handleHealth(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	setAPINoStoreHeaders(w)
+
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+
+	case http.MethodHead:
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(
+			w,
+			"method not allowed",
+			http.StatusMethodNotAllowed,
+		)
+	}
 }
 
 func (s *Server) handleConfig(

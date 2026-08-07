@@ -102,6 +102,78 @@ func newTestAdminServer(
 	)
 }
 
+func TestHandleHealth(t *testing.T) {
+	server := &Server{}
+
+	tests := []struct {
+		name       string
+		method     string
+		wantStatus int
+		wantBody   string
+		wantAllow  string
+	}{
+		{
+			name:       "get",
+			method:     http.MethodGet,
+			wantStatus: http.StatusOK,
+			wantBody:   "ok\n",
+		},
+		{
+			name:       "head",
+			method:     http.MethodHead,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "post",
+			method:     http.MethodPost,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantBody:   "method not allowed\n",
+			wantAllow:  "GET, HEAD",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(tt.method, "/healthz", nil)
+			response := httptest.NewRecorder()
+
+			server.handleHealth(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d",
+					response.Code,
+					tt.wantStatus,
+				)
+			}
+
+			if body := response.Body.String(); body != tt.wantBody {
+				t.Fatalf(
+					"body = %q, want %q",
+					body,
+					tt.wantBody,
+				)
+			}
+
+			if allow := response.Header().Get("Allow"); allow != tt.wantAllow {
+				t.Fatalf(
+					"Allow = %q, want %q",
+					allow,
+					tt.wantAllow,
+				)
+			}
+
+			if cacheControl := response.Header().Get("Cache-Control"); cacheControl != "no-store, max-age=0" {
+				t.Fatalf(
+					"Cache-Control = %q, want %q",
+					cacheControl,
+					"no-store, max-age=0",
+				)
+			}
+		})
+	}
+}
+
 func TestHandleConfigGet(t *testing.T) {
 	stored := config.Config{
 		Bind: "127.0.0.1",
