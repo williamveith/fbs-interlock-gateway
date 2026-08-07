@@ -14,7 +14,7 @@ SERVER_CA_KEY="${CA_DIR}/server-ca.key"
 SERVER_CA_CERT="${CA_DIR}/server-ca.crt"
 CLIENT_CA_KEY="${CA_DIR}/client-ca.key"
 CLIENT_CA_CERT="${CA_DIR}/client-ca.crt"
-CA_VALID_DAYS="${CA_VALID_DAYS:-3650}"
+CA_VALID_DAYS="${CA_VALID_DAYS:-36500}"
 
 command -v openssl >/dev/null 2>&1 || { echo "ERROR: openssl is required."; exit 1; }
 

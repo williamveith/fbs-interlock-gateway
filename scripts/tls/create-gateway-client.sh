@@ -16,7 +16,7 @@ CONFIG_FILE="${GATEWAY_DIR}/gateway-client.cnf"
 KEY_FILE="${GATEWAY_DIR}/gateway-client.key"
 CSR_FILE="${GATEWAY_DIR}/gateway-client.csr"
 CERT_FILE="${GATEWAY_DIR}/gateway-client.crt"
-CERT_VALID_DAYS="${CERT_VALID_DAYS:-825}"
+CERT_VALID_DAYS="${CERT_VALID_DAYS:-36500}"
 
 command -v openssl >/dev/null 2>&1 || { echo "ERROR: openssl is required."; exit 1; }
 
