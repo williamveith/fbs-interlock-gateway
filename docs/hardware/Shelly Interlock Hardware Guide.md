@@ -389,11 +389,12 @@ The authoritative editable hardware assets are:
 
 ```text
 docs/hardware/
-├── README.md
-├── 110-240VAC Junction Box Label.svg
-├── 12VDC Junction Box Label.svg
-├── Wiring Powered From 12VDC.svg
-└── Wiring Powered From Tool (110-240VAC).svg
+├── Shelly Interlock Hardware Guide.md
+└── assets /
+    ├── 110-240VAC Junction Box Label.svg
+    ├── 12VDC Junction Box Label.svg
+    ├── Wiring Powered From 12VDC.svg
+    └── Wiring Powered From Tool (110-240VAC).svg
 ```
 
 | File | Purpose |

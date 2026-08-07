@@ -51,7 +51,7 @@ MACOS_DEPLOYMENT_GUIDE_PATTERN ?= macOS*.md
 
 PANDOC ?= pandoc
 PDF_ENGINE ?= xelatex
-PDF_MARGIN ?= 0.5in
+PDF_MARGIN ?= 0.3in
 PDF_FONT_SIZE ?= 12pt
 PDF_MAIN_FONT ?= IBMPlexMono-Regular
 PDF_MONO_FONT ?= IBMPlexMono-Regular
