@@ -45,11 +45,11 @@ jobs:
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
-          fingerprint: 6FC7BEA18A448C13F2C844889DEFAA30FF6AFF07
+          fingerprint: ${{ vars.GPG_FINGERPRINT }}
           git_user_signingkey: true
           git_tag_gpgsign: true
-          git_committer_name: William Veith
-          git_committer_email: william.veith@gmail.com
+          git_committer_name: ${{ vars.GIT_COMMITTER_NAME }}
+          git_committer_email: ${{ vars.GIT_COMMITTER_EMAIL }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
