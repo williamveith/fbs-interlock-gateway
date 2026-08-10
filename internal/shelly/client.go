@@ -133,7 +133,7 @@ func newClient(
 	tlsConfig config.ShellyTLSConfig,
 ) (*Client, error) {
 	if timeout <= 0 {
-		return nil, errors.New("Shelly request timeout must be greater than zero")
+		return nil, errors.New("shelly request timeout must be greater than zero")
 	}
 
 	transport := &http.Transport{
@@ -528,7 +528,7 @@ func (c *Client) doGETWithPriority(
 	if resp == nil {
 		release()
 		return nil, errors.New(
-			"Shelly HTTP client returned a nil response",
+			"shelly HTTP client returned a nil response",
 		)
 	}
 
@@ -741,8 +741,8 @@ func shouldRetryStatus(ctx context.Context, err error) bool {
 	}
 
 	var networkError net.Error
-	if errors.As(err, &networkError) {
-		return networkError.Timeout() || networkError.Temporary()
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return true
 	}
 
 	return errors.Is(err, io.EOF) ||
@@ -972,7 +972,7 @@ func (t *requestTiming) wrapError(host string, err error) error {
 	}
 
 	return fmt.Errorf(
-		"Shelly request host=%s phase=%s elapsed=%s connection_reused=%t tls_resumed=%t: %w",
+		"shelly request host=%s phase=%s elapsed=%s connection_reused=%t tls_resumed=%t: %w",
 		host,
 		phase,
 		time.Since(t.started).Round(time.Millisecond),
@@ -1020,15 +1020,15 @@ func tlsConfigured(cfg config.ShellyTLSConfig) bool {
 
 func loadTLSConfig(cfg config.ShellyTLSConfig) (*tls.Config, error) {
 	if strings.TrimSpace(cfg.ServerCAFile) == "" {
-		return nil, errors.New("Shelly TLS server CA file is required")
+		return nil, errors.New("shelly TLS server CA file is required")
 	}
 
 	if strings.TrimSpace(cfg.ClientCertFile) == "" {
-		return nil, errors.New("Shelly TLS client certificate file is required")
+		return nil, errors.New("shelly TLS client certificate file is required")
 	}
 
 	if strings.TrimSpace(cfg.ClientKeyFile) == "" {
-		return nil, errors.New("Shelly TLS client key file is required")
+		return nil, errors.New("shelly TLS client key file is required")
 	}
 
 	caPEM, err := os.ReadFile(cfg.ServerCAFile)
@@ -1042,7 +1042,7 @@ func loadTLSConfig(cfg config.ShellyTLSConfig) (*tls.Config, error) {
 
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("Shelly server CA file contains no valid certificates")
+		return nil, errors.New("shelly server CA file contains no valid certificates")
 	}
 
 	clientCertificate, err := tls.LoadX509KeyPair(
@@ -1070,18 +1070,18 @@ func rpcURL(
 	host := strings.TrimSpace(tool.IP)
 
 	if host == "" {
-		return "", errors.New("Shelly host is empty")
+		return "", errors.New("shelly host is empty")
 	}
 
 	if strings.Contains(host, "://") {
 		return "", fmt.Errorf(
-			"Shelly host %q must not include a URL scheme",
+			"shelly host %q must not include a URL scheme",
 			host,
 		)
 	}
 
 	if strings.TrimSpace(method) == "" {
-		return "", errors.New("Shelly RPC method is empty")
+		return "", errors.New("shelly RPC method is empty")
 	}
 
 	u := url.URL{
