@@ -211,9 +211,11 @@ endif
 	fmt-check \
 	tidy-check \
 	vet \
+	staticcheck \
 	test \
 	test-race \
 	scripts-check \
+	shellcheck \
 	build-check \
 	verify \
 	init-config \
@@ -797,6 +799,9 @@ tidy-check:
 vet:
 	go vet ./...
 
+staticcheck:
+	go tool staticcheck ./...
+
 test-race:
 	go test -race -count=1 ./...
 
@@ -828,6 +833,11 @@ scripts-check:
 		echo "Skipping plist validation: plutil and python3 unavailable."; \
 	fi
 
+shellcheck:
+	find scripts services \
+		-type f \( -name '*.sh' -o -name '*.sh.in' \) \
+		-exec shellcheck {} +
+
 build-check:
 	mkdir -p "$(BUILD_DIR)/ci"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
@@ -856,7 +866,7 @@ build-check:
 		-o "$(BUILD_DIR)/ci/$(APP)-darwin-amd64" \
 		$(CMD)
 
-verify: fmt-check tidy-check vet test-race scripts-check build-check
+verify: fmt-check tidy-check vet staticcheck test-race scripts-check shellcheck build-check
 
 release: \
 	verify \
