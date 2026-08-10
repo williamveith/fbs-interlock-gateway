@@ -2,7 +2,7 @@
 title: "FBS Interlock Gateway"
 subtitle: "Shelly Interlock Hardware Guide"
 author: "William Veith"
-date: "2026-08-06"
+date: "2026-08-09"
 lang: en-US
 ---
 
@@ -20,6 +20,7 @@ lang: en-US
 - [Supported Power Configurations](#supported-power-configurations)
 - [Pre-Fabrication Checklist](#pre-fabrication-checklist)
 - [General Materials](#general-materials)
+- [Bill of Materials](#bill-of-materials)
 - [Wiring Configuration: External 12 VDC Supply](#wiring-configuration-external-12-vdc-supply)
 - [Wiring Configuration: Tool 110–240 VAC Supply](#wiring-configuration-tool-110240-vac-supply)
 - [Junction-Box Labels](#junction-box-labels)
@@ -122,6 +123,42 @@ The enclosure size is recorded as supplied for the selected box. Confirm the man
 > **Material substitution**
 >
 > When substituting an enclosure, cable gland, connector, or relay model, verify that the replacement remains suitable for the intended voltage, conductor type, environment, and installation method. Update the corresponding drawing or build record when the substitution changes the assembly.
+
+# Bill of Materials
+
+The following bills of materials are based on the `Materials Required For Junction Boxes` workbook. Quantities and costs are per completed junction-box assembly. The unit-price values link to the specific product listings recorded in the workbook.
+
+> **Pricing note**
+>
+> Unit prices are procurement references, not fixed quotations. Prices, package quantities, shipping, taxes, and product availability may change. Line costs and assembly totals below use the quantities and unit prices recorded in the source workbook; displayed totals are rounded to the nearest cent.
+
+## External 12 VDC supply
+
+| Component | Specification | Qty. | Unit Price | Line Cost |
+| --- | --- | ---: | ---: | ---: |
+| Junction Box | 4.5" × 3.5" × 2.2" IP65 ABS, black | 1 | [$7.25](https://www.amazon.com/Zulkit-Dustproof-Waterproof-Universal-Electrical/dp/B07Z42YCXF?refinements=p_n_g-101013999996111%3A107518270011%2Cp_n_g-101013998791111%3A107245770011%2Cp_n_g-101013998994111%3A107245762011&rnid=107245654011) | $7.25 |
+| Cable Gland | PG7, IP68, PA66, black | 2 | [$0.45](https://www.amazon.com/AMPELE-Plastic-Waterproof-Adjustable-Connectors/dp/B08TCFM4C7) | $0.90 |
+| Wireless Relay | Shelly 1 Gen4 (S4SW-001X16EU) | 1 | [$24.99](https://us.shelly.com/products/shelly-1-gen4) | $24.99 |
+| Power Supply | 12 VDC, 10' cable | 1 | [$10.36](https://www.amazon.com/Adapter-Extension-5-5x2-5mm-Replacement-Transformer/dp/B0D4TBSZ4B?cv_ct_cx=12v%2B1a%2Bpower%2Bsupply&refinements=p_n_g-1004150843091%3A23555329011&rnid=23555276011&aref=Vxpa8WQnsK) | $10.36 |
+| Splicing Connector | WAGO 221-412, 600 V, 105 °C, V2 | 1 | [$0.34](https://www.homedepot.com/pep/WAGO-221-412-Wire-Lever-Nuts-2-Wire-Conductor-Compact-Splicing-Connectors-50-Pack-0221412K00-012/326254029?mtc=SEM-BF-CDP-GGL-D27E-027_011_ELECTRICAL_ACCESSORIES-NA-NA-NA-DSA-NA-NA-NA-NA-NBR-NA-NA-NEW-NA-Feed&cm_mmc=SEM-BF-CDP-GGL-D27E-027_011_ELECTRICAL_ACCESSORIES-NA-NA-NA-DSA-NA-NA-NA-NA-NBR-NA-NA-NEW-NA-Feed-16187052617-134167688558-2399809273423&gclsrc=aw.ds&gad_source=1&gad_campaignid=16187052617&gbraid=0AAAAADq61UeUSmuKELQSO79cdjPO_zOLu&gclid=Cj0KCQjwsMLSBhD9ARIsAIpUTDqQDcs5WrQ3FeE08Gp0L2s61zYMUIUL3y2XW9-_mob8DLrPHo_fDFEaAsumEALw_wcB) | $0.34 |
+| Ferrule | 12 AWG insulated bootlace ferrule, single-conductor, black collar, 9 mm pin, 3.2 mm barrel OD, 105 °C | 4 | [$0.01](https://www.amazon.com/Fidioto-Terminals-Connector-Insulated-Industrial/dp/B0BFFPGFYD) | $0.04 |
+
+**Estimated material cost per 12 VDC assembly: $43.88**
+
+## Tool 110–240 VAC supply
+
+| Component | Specification | Qty. | Unit Price | Line Cost |
+| --- | --- | ---: | ---: | ---: |
+| Junction Box | 4.5" × 3.5" × 2.2" IP65 ABS, black | 1 | [$7.25](https://www.amazon.com/Zulkit-Dustproof-Waterproof-Universal-Electrical/dp/B07Z42YCXF?refinements=p_n_g-101013999996111%3A107518270011%2Cp_n_g-101013998791111%3A107245770011%2Cp_n_g-101013998994111%3A107245762011&rnid=107245654011) | $7.25 |
+| Cable Gland | PG7, IP68, PA66, black | 2 | [$0.45](https://www.amazon.com/AMPELE-Plastic-Waterproof-Adjustable-Connectors/dp/B08TCFM4C7) | $0.90 |
+| Wireless Relay | Shelly 1 Gen4 (S4SW-001X16EU) | 1 | [$24.99](https://us.shelly.com/products/shelly-1-gen4) | $24.99 |
+| Splicing Connector | WAGO 221-412, 600 V, 105 °C, V2 | 2 | [$0.34](https://www.homedepot.com/pep/WAGO-221-412-Wire-Lever-Nuts-2-Wire-Conductor-Compact-Splicing-Connectors-50-Pack-0221412K00-012/326254029?mtc=SEM-BF-CDP-GGL-D27E-027_011_ELECTRICAL_ACCESSORIES-NA-NA-NA-DSA-NA-NA-NA-NA-NBR-NA-NA-NEW-NA-Feed&cm_mmc=SEM-BF-CDP-GGL-D27E-027_011_ELECTRICAL_ACCESSORIES-NA-NA-NA-DSA-NA-NA-NA-NA-NBR-NA-NA-NEW-NA-Feed-16187052617-134167688558-2399809273423&gclsrc=aw.ds&gad_source=1&gad_campaignid=16187052617&gbraid=0AAAAADq61UeUSmuKELQSO79cdjPO_zOLu&gclid=Cj0KCQjwsMLSBhD9ARIsAIpUTDqQDcs5WrQ3FeE08Gp0L2s61zYMUIUL3y2XW9-_mob8DLrPHo_fDFEaAsumEALw_wcB) | $0.68 |
+| Splicing Connector | WAGO 221-413, 600 V, 105 °C, V2 | 2 | [$0.4294](https://www.homedepot.com/p/WAGO-221-413-Lever-Nuts-3-Conductor-Splicing-Connectors-12-24AWG-50-Pack-0221413K00-012/326483207?MERCH=REC-_-pipsem-_-326254029-_-0-_-n/a-_-n/a-_-n/a-_-n/a-_-n/a) | $0.86 |
+| Wire | 12 AWG stranded copper, UL 1015, 600 V, 105 °C, VW-1, white | 1 | [$0.07](https://www.amazon.com/Stranded-Electrical-Insulation-Residential-Industrial/dp/B0G13HX87C) | $0.07 |
+| Wire | 12 AWG stranded copper, UL 1015, 600 V, 105 °C, VW-1, black | 2 | [$0.07](https://www.amazon.com/Stranded-Electrical-Insulation-Residential-Industrial/dp/B0G13PJVXY) | $0.14 |
+| Ferrule | 12 AWG insulated bootlace ferrule, single-conductor, 9 mm pin, 3.2 mm barrel OD, 105 °C | 4 | [$0.01](https://www.amazon.com/Fidioto-Terminals-Connector-Insulated-Industrial/dp/B0BFFPGFYD) | $0.04 |
+
+**Estimated material cost per 110–240 VAC assembly: $34.93**
 
 <div class="page-break"></div>
 
