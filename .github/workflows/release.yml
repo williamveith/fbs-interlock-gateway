@@ -120,7 +120,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILDER_SHA: PUT_THE_BUILDER_SHA_HERE
+          BUILDER_SHA: 77ebf8f3386b18016fccba58fe2e93e69be25f4b
         run: |
           set -euo pipefail
 
