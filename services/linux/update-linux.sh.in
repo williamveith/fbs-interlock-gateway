@@ -47,6 +47,7 @@ ASSET="${APP}-linux-${ARCH}"
 BASE_URL="https://github.com/${REPO}/releases/latest/download"
 BIN_URL="${BASE_URL}/${ASSET}"
 SHA_URL="${BASE_URL}/${ASSET}.sha256"
+SIG_URL="${BASE_URL}/${ASSET}.sha256.sig"
 
 CURRENT_BIN="${INSTALL_DIR}/${APP}"
 
@@ -57,6 +58,13 @@ if [[ ! -d "$INSTALL_DIR" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$CURRENT_BIN" ]]; then
+  echo "ERROR: A trusted installed gateway binary is required:"
+  echo "  $CURRENT_BIN"
+  echo "Run install.sh or perform the one-time signed-update bootstrap first."
+  exit 1
+fi
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -64,57 +72,76 @@ echo "Checking latest release for ${APP}..."
 echo "Architecture: linux-${ARCH}"
 echo
 
-# Download the small checksum file first. Do not download the binary until
-# the installed binary has been shown to differ from the latest release.
-echo "Downloading latest checksum..."
+# The hourly path downloads only the tiny checksum and its 64-byte Ed25519
+# signature. The release binary itself is downloaded only when the authenticated
+# release checksum differs from the installed binary.
+echo "Downloading latest signed checksum..."
 curl \
   --fail \
   --location \
   --retry 3 \
   --connect-timeout 10 \
+  --proto '=https' \
+  --tlsv1.2 \
   --output "${TMP_DIR}/${ASSET}.sha256" \
-  "$SHA_URL"
+  "$SHA_URL" \
+  --output "${TMP_DIR}/${ASSET}.sha256.sig" \
+  "$SIG_URL"
 
-EXPECTED_SHA="$(
-  awk 'NF >= 1 { print $1; exit }' \
-    "${TMP_DIR}/${ASSET}.sha256"
-)"
+echo "Verifying release checksum signature..."
+VERIFY_ERROR="${TMP_DIR}/verify-update.err"
 
-if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-fA-F]{64}$ ]]; then
-  echo "ERROR: Release checksum file contains an invalid SHA-256 value."
+if ! EXPECTED_SHA="$(
+  "$CURRENT_BIN" verify-update-checksum \
+    --checksum "${TMP_DIR}/${ASSET}.sha256" \
+    --signature "${TMP_DIR}/${ASSET}.sha256.sig" \
+    --asset "$ASSET" \
+    2>"$VERIFY_ERROR"
+)"; then
+  if [[ -s "$VERIFY_ERROR" ]]; then
+    cat "$VERIFY_ERROR" >&2
+  fi
+
+  echo "ERROR: Release checksum signature verification failed."
+  echo "No update will be downloaded or installed."
   exit 1
 fi
 
 EXPECTED_SHA="${EXPECTED_SHA,,}"
 
-if [[ -f "$CURRENT_BIN" ]]; then
-  CURRENT_SHA="$(
-    sha256sum "$CURRENT_BIN" |
-      awk '{ print $1 }'
-  )"
-
-  CURRENT_SHA="${CURRENT_SHA,,}"
-
-  echo "Installed checksum: $CURRENT_SHA"
-  echo "Latest checksum:    $EXPECTED_SHA"
-
-  if [[ "$CURRENT_SHA" == "$EXPECTED_SHA" ]]; then
-    echo "Already running the latest binary."
-    exit 0
-  fi
-
-  echo "A newer or different binary is available."
-else
-  echo "No installed binary was found."
+if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: Trusted checksum verifier returned an invalid SHA-256 value."
+  exit 1
 fi
 
+echo "Release checksum signature verified."
+
+CURRENT_SHA="$(
+  sha256sum "$CURRENT_BIN" |
+    awk '{ print $1 }'
+)"
+
+CURRENT_SHA="${CURRENT_SHA,,}"
+
+echo "Installed checksum: $CURRENT_SHA"
+echo "Latest checksum:    $EXPECTED_SHA"
+
+if [[ "$CURRENT_SHA" == "$EXPECTED_SHA" ]]; then
+  echo "Already running the latest binary."
+  exit 0
+fi
+
+echo "A newer or different authenticated binary is available."
 echo
 echo "Downloading latest binary..."
+
 curl \
   --fail \
   --location \
   --retry 3 \
   --connect-timeout 10 \
+  --proto '=https' \
+  --tlsv1.2 \
   --output "${TMP_DIR}/${ASSET}" \
   "$BIN_URL"
 
@@ -127,26 +154,68 @@ DOWNLOADED_SHA="$(
 DOWNLOADED_SHA="${DOWNLOADED_SHA,,}"
 
 if [[ "$DOWNLOADED_SHA" != "$EXPECTED_SHA" ]]; then
-  echo "ERROR: Downloaded binary checksum does not match the release checksum."
+  echo "ERROR: Downloaded binary checksum does not match the authenticated release checksum."
   echo "Expected: $EXPECTED_SHA"
   echo "Received: $DOWNLOADED_SHA"
   exit 1
 fi
 
-echo "Checksum verified."
+echo "Downloaded binary checksum verified."
 
 chmod 0755 "${TMP_DIR}/${ASSET}"
 
-BACKUP=""
+extract_version() {
+  "$1" -version 2>/dev/null |
+    sed -n 's/.* version=\([^ ]*\).*/\1/p'
+}
 
-if [[ -f "$CURRENT_BIN" ]]; then
-  BACKUP="${INSTALL_DIR}/${APP}.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+stable_semver_key() {
+  local value="$1"
 
-  echo "Backing up current binary:"
-  echo "  $BACKUP"
+  if [[ ! "$value" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    return 1
+  fi
 
-  cp -a "$CURRENT_BIN" "$BACKUP"
+  printf '%020d%020d%020d\n' \
+    "$((10#${BASH_REMATCH[1]}))" \
+    "$((10#${BASH_REMATCH[2]}))" \
+    "$((10#${BASH_REMATCH[3]}))"
+}
+
+CURRENT_VERSION="$(extract_version "$CURRENT_BIN")"
+CANDIDATE_VERSION="$(extract_version "${TMP_DIR}/${ASSET}")"
+
+if [[ -z "$CURRENT_VERSION" || -z "$CANDIDATE_VERSION" ]]; then
+  echo "ERROR: Could not read version metadata from the current or candidate binary."
+  exit 1
 fi
+
+CURRENT_VERSION_KEY="$(stable_semver_key "$CURRENT_VERSION")" || {
+  echo "ERROR: Installed version is not a stable semantic version: $CURRENT_VERSION"
+  echo "Automatic updates require versions in the form vMAJOR.MINOR.PATCH."
+  exit 1
+}
+
+CANDIDATE_VERSION_KEY="$(stable_semver_key "$CANDIDATE_VERSION")" || {
+  echo "ERROR: Candidate version is not a stable semantic version: $CANDIDATE_VERSION"
+  echo "Automatic updates require versions in the form vMAJOR.MINOR.PATCH."
+  exit 1
+}
+
+echo "Installed version: $CURRENT_VERSION"
+echo "Latest version:    $CANDIDATE_VERSION"
+
+if [[ "$CANDIDATE_VERSION_KEY" < "$CURRENT_VERSION_KEY" ]]; then
+  echo "ERROR: Refusing authenticated release downgrade."
+  exit 1
+fi
+
+BACKUP="${INSTALL_DIR}/${APP}.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+
+echo "Backing up current binary:"
+echo "  $BACKUP"
+
+cp -a "$CURRENT_BIN" "$BACKUP"
 
 WAS_ACTIVE=0
 
@@ -165,7 +234,7 @@ install \
   "${TMP_DIR}/${ASSET}" \
   "$CURRENT_BIN"
 
-# Verify that the installed binary is exactly the release binary.
+# Verify that the installed binary is exactly the authenticated release binary.
 INSTALLED_SHA="$(
   sha256sum "$CURRENT_BIN" |
     awk '{ print $1 }'
@@ -175,16 +244,16 @@ INSTALLED_SHA="${INSTALLED_SHA,,}"
 
 if [[ "$INSTALLED_SHA" != "$EXPECTED_SHA" ]]; then
   echo "ERROR: Installed binary checksum is incorrect."
+  echo "Expected: $EXPECTED_SHA"
+  echo "Received: $INSTALLED_SHA"
+  echo "Rolling back to previous binary..."
 
-  if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
-    echo "Rolling back to previous binary..."
-    install \
-      -o root \
-      -g root \
-      -m 0755 \
-      "$BACKUP" \
-      "$CURRENT_BIN"
-  fi
+  install \
+    -o root \
+    -g root \
+    -m 0755 \
+    "$BACKUP" \
+    "$CURRENT_BIN"
 
   if [[ "$WAS_ACTIVE" -eq 1 ]]; then
     systemctl start "$SERVICE_NAME" || true
@@ -192,6 +261,8 @@ if [[ "$INSTALLED_SHA" != "$EXPECTED_SHA" ]]; then
 
   exit 1
 fi
+
+echo "Installed binary checksum verified."
 
 if [[ "$WAS_ACTIVE" -eq 1 ]]; then
   echo "Starting service..."
@@ -201,20 +272,16 @@ if [[ "$WAS_ACTIVE" -eq 1 ]]; then
     systemctl --no-pager --full status "$SERVICE_NAME" || true
   else
     echo "ERROR: Service failed to start after update."
+    echo "Rolling back to previous binary..."
 
-    if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
-      echo "Rolling back to previous binary..."
+    install \
+      -o root \
+      -g root \
+      -m 0755 \
+      "$BACKUP" \
+      "$CURRENT_BIN"
 
-      install \
-        -o root \
-        -g root \
-        -m 0755 \
-        "$BACKUP" \
-        "$CURRENT_BIN"
-
-      systemctl start "$SERVICE_NAME" || true
-    fi
-
+    systemctl start "$SERVICE_NAME" || true
     exit 1
   fi
 else

@@ -12,6 +12,7 @@ import (
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
 	"github.com/williamveith/fbs-interlock-gateway/internal/gateway"
+	"github.com/williamveith/fbs-interlock-gateway/internal/updateauth"
 )
 
 var (
@@ -21,6 +22,17 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "verify-update-checksum" {
+		checksum, err := updateauth.VerifyUpdateChecksumCommand(os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println(checksum)
+		return
+	}
+
 	configPath := flag.String("config", "", "path to config.yaml")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	adminAddr := flag.String("admin", "127.0.0.1:18090", "admin UI listen address; empty disables admin UI")

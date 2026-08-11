@@ -2,7 +2,7 @@
 title: "FBS Interlock Gateway"
 subtitle: "Project Overview and Operations Reference"
 author: "William Veith"
-date: "2026-08-06"
+date: "2026-08-10"
 lang: en-US
 ---
 
@@ -20,6 +20,7 @@ lang: en-US
 - [Capabilities](#capabilities)
 - [Safety and Security Model](#safety-and-security-model)
   - [Platform Firewall Behavior](#platform-firewall-behavior)
+  - [Release and Update Trust](#release-and-update-trust)
 - [System Architecture](#system-architecture)
 - [Interlock Hardware](#interlock-hardware)
 - [Repository Layout](#repository-layout)
@@ -108,7 +109,8 @@ The repository covers the complete interlock system boundary: application behavi
 | [Linux Installation and Operations Guide](<docs/deployment guides/Linux Install Instructions.md>) | Linux build, installation, systemd supervision, UFW, updates, logging, troubleshooting, and uninstall |
 | [Windows Installation and Operations Guide](<docs/deployment guides/Windows Install Instructions.md>) | Windows deployment, Task Scheduler supervision, firewall controls, updates, logging, rollback, and uninstall |
 | [macOS Installation and Operations Guide](<docs/deployment guides/macOS Install Instructions.md>) | macOS deployment, LaunchDaemons, Application Firewall, Packet Filter, updates, logging, rollback, and uninstall |
-| [Shelly Interlock Hardware Guide](<docs/hardware/Shelly Interlock Hardware Guide.md>) | Junction-box materials, wiring configurations, label artwork, QR device identity, fabrication, verification, and maintenance |
+| [Shelly Interlock Hardware Guide](<docs/hardware/Shelly Interlock Hardware Guide.md>) | Junction-box materials, per-assembly bills of materials, wiring configurations, label artwork, QR device identity, fabrication, verification, and maintenance |
+| [Security Policy](SECURITY.md) | Supported versions, private vulnerability reporting, operational-safety limits, secret handling, coordinated disclosure, and safe-harbor expectations |
 
 Use this README for project-wide behavior and architecture. Use the platform guides for installation and operations, and use the hardware guide for physical interlock construction and audit documentation.
 
@@ -120,11 +122,12 @@ Use this README for project-wide behavior and architecture. Use the platform gui
 - Shelly Gen2/Gen3 RPC over per-tool `http` or `https`
 - optional Shelly HTTP Digest Authentication with reusable per-device digest sessions
 - optional mutual TLS with Shelly server verification and gateway client authentication
-- certificate-generation helpers for the private CAs, gateway identity, and per-device Shelly identities
-- version-controlled Shelly interlock wiring diagrams, junction-box label artwork, hardware build documentation, and QR-encoded device identity records for rapid auditing
+- certificate-generation helpers for separate private server/client CAs, the gateway identity, and per-device Shelly identities
+- canonical PKI source layout under `pki/`, with only required runtime trust/identity files copied into deployment builds
+- version-controlled Shelly interlock wiring diagrams, junction-box label artwork, per-assembly bills of materials, hardware build documentation, and QR-encoded device identity records for rapid auditing
 - shared HTTP connection reuse, TLS session caching, and per-device RPC serialization
 - FBS-priority device scheduling that defers or cancels lower-priority Admin probes
-- transient status retry and controlled recovery for persistent Shelly HTTP `423` and `429` responses
+- transient status retry for bounded timeout/connection failures and controlled recovery for persistent Shelly HTTP `423` and `429` responses
 - request-phase diagnostics for DNS, TCP, TLS, response-header, and response-body failures
 - an embedded Admin UI bound to localhost by default
 - a shared status store passively updated by normal FBS traffic
@@ -140,12 +143,17 @@ Use this README for project-wide behavior and architecture. Use the platform gui
 - Linux AMD64 and ARM64 deployment packages with runtime TLS files and rendered PDF guides
 - Windows AMD64 deployment packages with runtime TLS files, production/development installers, managed updates, and rendered PDF guides
 - macOS ARM64 and AMD64 deployment packages with runtime TLS files, production/development installers, managed updates, Packet Filter rules, and rendered PDF guides
-- Linux systemd supervision, UFW source restriction, checksum-aware updates, and standard or purge uninstall
-- Windows Task Scheduler supervision under restricted runtime credentials, source-restricted Windows Firewall rules, checksum-aware updates, log rotation, and rollback
-- macOS LaunchDaemon supervision under a dedicated service account, Application Firewall registration, managed `pf` source restriction, checksum-aware updates, log rotation, and rollback
-- cross-platform Bash, PowerShell, property-list, race-test, and build validation
-- GPG-signed release tags
-- SHA-256 checksums for release binaries
+- Linux systemd supervision, UFW source restriction, authenticated signed-checksum updates, downgrade protection, and standard or purge uninstall
+- Windows Task Scheduler supervision under restricted runtime credentials, source-restricted Windows Firewall rules, authenticated signed-checksum updates, log rotation, downgrade protection, and rollback
+- macOS LaunchDaemon supervision under a dedicated service account, Application Firewall registration, managed `pf` source restriction, authenticated signed-checksum updates, log rotation, downgrade protection, and rollback
+- an embedded Ed25519 update-trust public key and dependency-free `verify-update-checksum` command used by installed updaters
+- Go 1.26 development with `go vet`, Staticcheck, race testing, Bash syntax validation, ShellCheck, PowerShell validation, plist validation, and cross-platform build checks
+- weekly Dependabot maintenance for Go modules and GitHub Actions
+- full-commit-SHA-pinned GitHub Actions and a separately pinned reusable trusted-builder workflow
+- SLSA v1 build provenance for release binaries and checksum files
+- Ed25519 detached signatures over authenticated release checksum files
+- GPG-signed annotated release tags
+- immutable GitHub Releases with release/asset attestation verification
 - a unified `make verify` validation gate
 
 # Safety and Security Model
@@ -195,6 +203,54 @@ FBS_PORT_RANGE = 8081:8981
 
 Review them before building a production deployment. Keep the Admin UI on `127.0.0.1`; the generated listener-range rules are not a replacement for Admin authentication or remote-access controls.
 
+## Release and Update Trust
+
+Release integrity is intentionally split across build, publication, and deployed-update trust boundaries.
+
+```text
+source commit on main
+        |
+        v
+pinned reusable trusted builder
+        |
+        +-> validated release binaries + SHA-256 files
+        |
+        +-> SLSA v1 provenance via GitHub OIDC/Sigstore
+                    |
+                    v
+publish job re-verifies provenance
+        |
+        +-> Ed25519-signs each authenticated .sha256 file
+        |
+        +-> verifies the embedded updater public key
+        |
+        +-> creates and locally verifies a GPG-signed tag
+                    |
+                    v
+immutable GitHub Release
+        |
+        +-> release attestation
+        +-> exact asset attestation verification
+                    |
+                    v
+installed gateway verifies .sha256.sig
+before trusting an update checksum
+```
+
+Important trust properties:
+
+- The release caller uses the reusable workflow in `williamveith/fbs-interlock-gateway-builder` at an exact full commit SHA.
+- The trusted build receives only the permissions required for build/provenance work; the release GPG key and update-signing private key are not exposed to repository build commands.
+- The publish job verifies SLSA provenance against the expected repository, exact source commit, `refs/heads/main`, exact trusted-builder workflow revision, SLSA provenance predicate, and a GitHub-hosted runner requirement before authorizing publication.
+- Only after provenance verification are the small `.sha256` files signed with the release-environment Ed25519 update-signing key.
+- The gateway executable embeds only the matching Ed25519 public key. The private update-signing key remains an environment secret and is never deployed.
+- The `verify-update-checksum` command verifies the detached 64-byte Ed25519 signature over the exact checksum-file bytes, validates the SHA-256 format, and requires the signed asset filename to match the requested release asset.
+- Production updaters use the currently installed trusted gateway executable to verify the checksum signature; a downloaded candidate is never allowed to authenticate itself.
+- Automatic updates require stable `vMAJOR.MINOR.PATCH` metadata and reject authenticated downgrades. Reinstalling the same version is allowed so an authenticated release can repair a locally altered binary.
+- GitHub release immutability and `gh release verify` / `gh release verify-asset` provide a separate publication-level check in addition to SLSA build provenance.
+
+The repository's [Security Policy](SECURITY.md) defines vulnerability-reporting, operational-safety, secret-handling, and coordinated-disclosure expectations.
+
 # System Architecture
 
 ```text
@@ -232,11 +288,14 @@ The hardware documentation includes:
 - a wiring configuration powered from the tool's 110–240 VAC supply
 - junction-box label artwork for both power configurations
 - a general materials list for building the interlock boxes
+- bills of materials with procurement links and recorded per-assembly costs for both supported power configurations
 - the recorded 30 W fiber-laser settings used to mark the box lids
 - QR-code label data encoded as serialized JSON containing the Shelly device name, model number, and unique device ID
 - a phone-based audit workflow for rapidly collecting and verifying installed-device identity information
 
 Each junction-box QR code records the installed Shelly identity in a compact JSON object, such as `{"device":"Shelly 1 Gen4","model":"S4SW-001X16EU","id":"A085E3B5325C"}`. Scanning the label with a phone provides a fast, auditable record of the device type, model, and unique Shelly ID.
+
+The hardware guide records estimated material costs of **$43.88 per external-12-VDC assembly** and **$34.93 per tool-powered 110–240 VAC assembly** using the source-workbook quantities and prices. Procurement prices are references rather than fixed quotations.
 
 The diagrams document the associated interlock hardware but do not replace qualified electrical review, applicable codes, equipment ratings, or facility safety requirements.
 
@@ -275,6 +334,13 @@ internal/shelly/
 internal/status/
   revision-protected shared in-memory Admin status store
 
+internal/updateauth/
+  embedded Ed25519 update-trust public key, signed-checksum verifier,
+  CLI command implementation, and security-focused tests
+
+scripts/pandoc/
+  inline-code wrapping filter used by deployment-guide PDF rendering
+
 scripts/tls/
   private-CA, gateway-client, and per-Shelly certificate generation
 
@@ -297,11 +363,18 @@ docs/
   hardware/
     Shelly interlock wiring diagrams, junction-box label artwork, and build notes
 
+.github/dependabot.yml
+  weekly Go-module and GitHub Actions dependency maintenance
+
 .github/workflows/
-  CI and guarded release automation
+  CI plus trusted-build, provenance, signing, immutable-release,
+  and publication-verification automation
+
+SECURITY.md
+  vulnerability reporting, operational safety, disclosure, and safe-harbor policy
 ```
 
-The generated `pki/`, `tls/`, and `build/` directories are intentionally excluded from version control.
+The generated `pki/` and `build/` directories are intentionally excluded from version control. Runtime TLS files are copied directly from the private `pki/` source tree into generated deployment directories; there is no repository-root runtime `tls/` staging directory.
 
 # FBS-Facing Behavior
 
@@ -404,8 +477,9 @@ Additional behavior:
 - the FBS operation records the authoritative result in the same shared status store used by the Admin UI
 - Digest challenges are retained in a per-device session, allowing subsequent requests to send a preemptive Authorization header with an increasing nonce count
 - digest sessions expire after 55 minutes or 30,000 nonce uses and are replaced when the device returns a new challenge
-- a transient status-network failure is retried once after 150 milliseconds
-- certificate validation errors and Admin deferrals are not retried
+- retryable status failures are limited to network timeouts, EOF/unexpected EOF, connection reset, connection refused, and broken-pipe conditions and are retried once after 150 milliseconds
+- deprecated `net.Error.Temporary()` classification is not used
+- certificate validation errors, caller cancellation/deadline completion, and Admin deferrals are not retried
 - HTTP `429 Too Many Requests` waits two seconds and retries once
 - a persistent HTTP `429` or an HTTP `423 Locked` schedules one controlled `Shelly.Reboot` request
 - reboot recovery uses a 500-millisecond device reboot delay, suppresses duplicate in-flight attempts, and enforces a five-minute per-device cooldown
@@ -742,13 +816,13 @@ Create a starter config:
 make init-config
 ```
 
-The target preserves an existing local `config.yaml`. The generated starter uses a three-second Shelly request-attempt timeout and relative TLS paths that work with the installed layout on every supported platform:
+The target preserves an existing local `config.yaml`. The generated starter uses a five-second Shelly request-attempt timeout and relative TLS paths that work with the installed layout on every supported platform. If `defaults.timeout_ms` is omitted from an existing configuration, the runtime default remains three seconds:
 
 ```yaml
 bind: 0.0.0.0
 
 defaults:
-  timeout_ms: 3000
+  timeout_ms: 5000
   safe_state_on_error: "off"
   shelly_tls:
     server_ca_file: "./tls/server-ca.crt"
@@ -771,7 +845,7 @@ Example with HTTP and HTTPS tools:
 bind: "0.0.0.0"
 
 defaults:
-  timeout_ms: 3000
+  timeout_ms: 5000
   safe_state_on_error: "off"
   shelly_tls:
     server_ca_file: "./tls/server-ca.crt"
@@ -807,7 +881,7 @@ When any TLS path is populated, the gateway initializes its TLS client from thos
 | Field | Purpose |
 | --- | --- |
 | `bind` | Address used by FBS-facing listeners. Use `0.0.0.0` to listen on all interfaces. |
-| `defaults.timeout_ms` | Timeout applied to each Shelly request attempt. The generated starter uses `3000` milliseconds. A retried status operation can use a second attempt plus the 150-millisecond retry delay. |
+| `defaults.timeout_ms` | Timeout applied to each Shelly request attempt. The generated starter uses `5000` milliseconds; an omitted value defaults to `3000` milliseconds at runtime. A retried status operation can use a second attempt plus the 150-millisecond retry delay. |
 | `defaults.safe_state_on_error` | State reported when an interlock cannot be reached. Usually `off`. |
 | `defaults.shelly_tls.server_ca_file` | CA certificate used to verify HTTPS Shelly server certificates. |
 | `defaults.shelly_tls.client_cert_file` | Gateway client certificate presented to HTTPS Shellies. |
@@ -843,7 +917,7 @@ The gateway deep-clones configuration when it is accepted and whenever a snapsho
 
 # Development and Validation
 
-Use the Go version declared in `go.mod`.
+The module declares **Go 1.26** in `go.mod`. Staticcheck is recorded as a Go tool dependency, so the repository uses the pinned module version through `go tool staticcheck` rather than relying on an arbitrary globally installed Staticcheck binary.
 
 Create a local configuration:
 
@@ -865,6 +939,8 @@ make fmt
 make test
 make test-race
 make vet
+make staticcheck
+make shellcheck
 make verify
 ```
 
@@ -872,17 +948,19 @@ make verify
 
 1. `gofmt` verification without modifying source files
 2. `go.mod` and `go.sum` consistency checks
-3. `go vet`
-4. all Go tests under the race detector, including Admin/FBS preemption, incremental fleet-refresh, independent configuration-copy, shared-status, Digest nonce-order, TLS, retry, and recovery tests
-5. Bash syntax checks for top-level helpers, TLS helpers, Linux production/development installers, Linux uninstaller and updater, and macOS production/development installers, startup wrapper, uninstaller, and updater
-6. PowerShell parser validation for the Windows installer, updater, and uninstaller when `pwsh` is available
-7. a platform-independent check for ambiguous PowerShell variable interpolation before a colon
-8. validation of both macOS LaunchDaemon property lists with `plutil` or Python's `plistlib`
-9. Linux AMD64 build validation
-10. Linux ARM64 build validation
-11. Windows AMD64 build validation
-12. macOS ARM64 build validation
-13. macOS AMD64 build validation
+3. `go vet ./...`
+4. `go tool staticcheck ./...`
+5. all Go tests under the race detector, including Admin/FBS preemption, incremental fleet refresh, independent configuration-copy, shared-status, Digest, TLS, retry/recovery, and signed-update authorization tests
+6. Bash syntax checks for top-level helpers, TLS helpers, and Linux/macOS deployment scripts
+7. ShellCheck across `scripts/` and `services/` shell source/templates
+8. PowerShell parser validation for the Windows installer, updater, and uninstaller when `pwsh` is available
+9. a platform-independent check for ambiguous PowerShell variable interpolation before a colon
+10. validation of both macOS LaunchDaemon property lists with `plutil` or Python's `plistlib`
+11. Linux AMD64 build validation
+12. Linux ARM64 build validation
+13. Windows AMD64 build validation
+14. macOS ARM64 build validation
+15. macOS AMD64 build validation
 
 Individual validation targets:
 
@@ -890,8 +968,10 @@ Individual validation targets:
 make fmt-check
 make tidy-check
 make vet
+make staticcheck
 make test-race
 make scripts-check
+make shellcheck
 make build-check
 ```
 
@@ -905,19 +985,21 @@ make shelly-cert
 
 Deployment package builds additionally require the PDF toolchain described below because the platform Markdown guides are rendered into the build directories.
 
-The private `pki/` is ignored by Git.
+The private `pki/` tree is ignored by Git. Do not commit generated CA material, gateway or Shelly private keys, production configuration, or release-signing secrets.
 
 # Building Deployment Packages
 
 ## Prepare Runtime TLS Files
 
-Every Linux, Windows, and macOS deployment build requires these repository-local runtime files:
+Every Linux, Windows, and macOS deployment build requires three runtime identity/trust files, sourced directly from the canonical PKI tree:
 
 ```text
-tls/
-├── server-ca.crt
-├── gateway-client.crt
-└── gateway-client.key
+pki/
+├── ca/
+│   └── server-ca.crt
+└── gateway/
+    ├── gateway-client.crt
+    └── gateway-client.key
 ```
 
 Generate them with:
@@ -927,9 +1009,9 @@ make ca
 make gateway-cert
 ```
 
-Each platform build fails before packaging when any required runtime TLS file is missing. Only the three runtime files are copied into deployment directories; the complete `pki/` directory, CA private keys, CSRs, `client-ca.crt`, and Shelly private keys remain excluded.
+The Makefile verifies those source files and copies only the required runtime material into the platform deployment directory's `tls/` subdirectory. There is no repository-root staging `tls/` directory.
 
-The staged private key is created with mode `0600`; the certificates use `0644`. Platform installers then apply the native installed permissions required by their service accounts.
+The complete `pki/` directory, CA private keys, CSRs, `client-ca.crt`, and per-device Shelly private keys remain excluded from deployment packages. The copied gateway private key uses mode `0600` in generated build output; certificates use `0644`. Platform installers then apply the native installed permissions required by their service accounts.
 
 ## Deployment-Guide PDF Requirements
 
@@ -948,13 +1030,14 @@ Required tools and defaults:
 ```make
 PANDOC = pandoc
 PDF_ENGINE = xelatex
-PDF_MARGIN = 0.5in
+PDF_MARGIN = 0.3in
 PDF_FONT_SIZE = 12pt
 PDF_MAIN_FONT = IBMPlexMono-Regular
 PDF_MONO_FONT = IBMPlexMono-Regular
+PANDOC_INLINE_CODE_FILTER = scripts/pandoc/wrap-inline-code.lua
 ```
 
-Install Pandoc, XeLaTeX, and the configured fonts before building deployment packages. Override a pattern or PDF variable at invocation time when needed, for example:
+Install Pandoc, XeLaTeX, the configured fonts, and the LaTeX support needed by `fvextra` before building deployment packages. The Lua filter wraps long inline-code spans, and `fvextra` enables line breaking in verbatim/code blocks so generated deployment PDFs do not run past the page width. Override a pattern or PDF variable at invocation time when needed, for example:
 
 ```bash
 make build-linux-amd64 \
@@ -981,7 +1064,7 @@ The normal `install.sh` installs and enables managed automatic updates. `install
 make build-windows-amd64
 ```
 
-The Windows package includes production and development launchers, the PowerShell installer, startup supervisor, checksum-aware updater, uninstaller, runtime TLS files, and rendered guide PDFs.
+The Windows package includes production and development launchers, the PowerShell installer, startup supervisor, authenticated signed-checksum updater, uninstaller, runtime TLS files, and rendered guide PDFs.
 
 ## macOS Apple Silicon
 
@@ -997,7 +1080,7 @@ make build-darwin-arm64
 make build-darwin-amd64
 ```
 
-Both macOS packages include production and development installers, the startup wrapper, gateway and update LaunchDaemon property lists, updater, Packet Filter anchor, uninstaller, runtime TLS files, and rendered guide PDFs.
+Both macOS packages include production and development installers, the startup wrapper, gateway and update LaunchDaemon property lists, authenticated signed-checksum updater, Packet Filter anchor, uninstaller, runtime TLS files, and rendered guide PDFs.
 
 ## Generate Template-Derived Files Only
 
@@ -1110,7 +1193,7 @@ The exact PDF filenames follow the matching source Markdown basenames. Generated
 
 # Release Binaries
 
-Build all release binaries and checksums through the validation gate:
+Build all local release binaries and SHA-256 checksum files through the validation gate:
 
 ```bash
 make release VERSION=<version>
@@ -1126,9 +1209,9 @@ make release-darwin-arm64 VERSION=<version>
 make release-darwin-amd64 VERSION=<version>
 ```
 
-Release binaries contain only the executable and checksum. Generated TLS trust, certificates, and private keys are never included in GitHub release assets.
+The local `make release` output contains executables and their `.sha256` files. The GitHub release workflow later adds detached Ed25519 `.sha256.sig` files **after** the trusted build and SLSA provenance have been verified. Generated TLS trust, certificates, CA material, and private keys are never GitHub release assets.
 
-Release files are written to:
+Local release files are written to:
 
 ```text
 build/release/
@@ -1144,6 +1227,16 @@ build/release/
 └── fbs-interlock-gateway-darwin-amd64.sha256
 ```
 
+A published production release contains the five executables, five checksum files, and five detached signatures:
+
+```text
+<asset>
+<asset>.sha256
+<asset>.sha256.sig
+```
+
+The signature is a raw Ed25519 detached signature over the exact bytes of the corresponding `.sha256` file. Updaters authenticate the checksum with the public key embedded in the currently installed gateway before the checksum is used to authorize a candidate binary.
+
 Display embedded metadata:
 
 ```bash
@@ -1155,6 +1248,17 @@ Output format:
 ```text
 fbs-interlock-gateway version=<version> commit=<commit> date=<UTC-build-time>
 ```
+
+The executable also provides the internal updater-verification command:
+
+```bash
+fbs-interlock-gateway verify-update-checksum \
+  --checksum <asset>.sha256 \
+  --signature <asset>.sha256.sig \
+  --asset <asset>
+```
+
+On success, the command prints only the authenticated lowercase SHA-256 digest and exits with status `0`.
 
 # Service Templates and Installed Layouts
 
@@ -1332,7 +1436,45 @@ Deployment packages contain rendered PDF copies of the matching guides.
 
 # Automatic Updates and Log Maintenance
 
-Production installers enable managed release checks. Development installers keep the locally built gateway and disable managed release replacement. All updaters modify only the application executable and, where applicable, gateway log archives; they do not replace `config.yaml` or installed TLS files.
+Production installers enable managed hourly release checks. Development installers keep the locally built gateway and disable managed release replacement. All production updaters modify only the application executable and, where applicable, gateway log archives; they do not replace `config.yaml` or installed TLS files.
+
+The update protocol is deliberately lightweight. Every normal hourly check downloads only the architecture-specific `.sha256` file and its **64-byte Ed25519 detached signature**. The multi-megabyte executable is downloaded only when the authenticated SHA differs from the installed executable.
+
+```text
+hourly check
+    |
+    +-> download <asset>.sha256
+    +-> download <asset>.sha256.sig
+    |
+    v
+CURRENT installed gateway
+verify-update-checksum
+    |
+    +-> invalid signature / asset / SHA -> fail closed
+    |
+    v
+compare installed SHA
+    |
+    +-> same -> no binary download
+    |
+    v
+download candidate
+    |
+    +-> SHA must match authenticated checksum
+    +-> candidate version must be stable SemVer
+    +-> authenticated downgrade is rejected
+    |
+    v
+backup -> install/stage -> verify installed SHA
+    |
+    +-> restart/health failure -> rollback
+```
+
+The updaters do not require GitHub CLI, Cosign, GPG, OpenSSL, or another signature-verification package on deployed hosts. Ed25519 verification is performed by the already-installed gateway executable using Go's standard-library implementation and the embedded update-trust public key.
+
+Because the current executable is the trust anchor, the signed-update updater requires an existing trusted gateway binary that implements `verify-update-checksum`. A fresh installation or the documented one-time bootstrap is required before switching an older deployment to the hardened updater.
+
+Equal semantic versions are permitted when their bytes differ, allowing an authenticated release to repair a locally modified or corrupted binary. Lower semantic versions are rejected automatically.
 
 ## Linux
 
@@ -1340,16 +1482,18 @@ The generated systemd timer runs after boot and then periodically.
 
 The Linux updater:
 
-1. selects the matching Linux release asset
-2. downloads the release checksum first
-3. validates that the checksum contains a SHA-256 value
-4. computes the installed executable checksum
-5. exits without downloading or restarting when the installed checksum already matches
-6. downloads the binary only when it differs or is missing
-7. verifies the downloaded and installed checksums
-8. backs up the installed executable
-9. restarts the service only when required
-10. rolls back when the installed checksum is wrong or the service fails to start
+1. selects the matching Linux AMD64 or ARM64 release asset
+2. downloads only the matching `.sha256` and `.sha256.sig` metadata for the normal hourly check
+3. requires HTTPS/TLS 1.2 or newer for GitHub release downloads
+4. invokes the currently installed gateway to authenticate the checksum signature and asset name
+5. hashes the installed executable and exits without downloading or restarting when it already matches
+6. downloads the candidate binary only when the authenticated SHA differs
+7. verifies the candidate SHA against the authenticated checksum
+8. reads current and candidate `-version` metadata and rejects stable-SemVer downgrades
+9. backs up the installed executable
+10. installs and re-hashes the final executable
+11. restarts the service only when required
+12. rolls back when the installed checksum is wrong or the service fails to start
 
 Inspect or disable the timer:
 
@@ -1371,16 +1515,19 @@ Production installation creates the `FBS Interlock Gateway Update` Task Schedule
 
 Each run:
 
-1. acquires an update lock
-2. downloads the latest Windows amd64 checksum first
-3. compares it with the installed executable
-4. skips the executable download when the checksum already matches
-5. validates the downloaded checksum, PE format, amd64 machine type, and `-version` execution
-6. backs up the installed executable
-7. stops and restarts the gateway task as needed
-8. waits for the Admin API health check
-9. restores the previous executable when health validation fails
-10. rotates `gateway.log` and `gateway-error.log` when either reaches 10 MiB
+1. acquires an update lock and cleans a stale lock after the configured age
+2. downloads the Windows AMD64 `.sha256` and 64-byte `.sha256.sig`
+3. forces TLS 1.2 for Windows PowerShell 5.1 GitHub downloads
+4. uses the currently installed `fbs-interlock-gateway.exe` to authenticate the checksum
+5. compares the authenticated SHA with `Get-FileHash` of the installed executable
+6. skips the executable download when the SHA already matches
+7. verifies the candidate SHA, Windows PE format, and AMD64 machine type
+8. reads current and candidate version metadata and rejects authenticated downgrades
+9. preserves the existing executable ACL, creates a timestamped backup, and stages the replacement
+10. verifies the staged and final installed executable hashes
+11. restarts the gateway task and waits for the Admin API health check
+12. restores the previous executable and ACL when installation or health validation fails
+13. rotates `gateway.log` and `gateway-error.log` when either reaches 10 MiB
 
 Windows retains up to 30 numbered ZIP archives per gateway log.
 
@@ -1398,15 +1545,17 @@ Each run:
 
 1. acquires an update lock
 2. detects Apple Silicon or Intel architecture
-3. downloads the matching release checksum first
-4. compares it with the installed executable
-5. skips the binary download when the checksum already matches and no logs need rotation
-6. validates the downloaded checksum, Mach-O architecture, and installed binary
-7. creates a timestamped backup
-8. stops and restarts the gateway only when needed
-9. waits for the Admin API health check
-10. restores the previous binary when health validation fails
-11. rotates `gateway.log` and `gateway-error.log` when either reaches 10 MiB
+3. downloads the matching `.sha256` and 64-byte `.sha256.sig`
+4. requires HTTPS/TLS 1.2 or newer for GitHub release downloads
+5. uses the currently installed gateway to authenticate the checksum
+6. hashes the installed binary and skips the candidate download when it already matches and no log maintenance is required
+7. verifies the candidate SHA and Mach-O architecture
+8. reads current and candidate version metadata and rejects authenticated downgrades
+9. creates a timestamped backup and stages the replacement
+10. verifies the staged and final installed binary hashes
+11. restarts the gateway only when needed and waits for the Admin API health check
+12. restores the previous binary when installation or health validation fails
+13. rotates `gateway.log` and `gateway-error.log` when either reaches 10 MiB
 
 macOS retains up to 30 numbered gzip archives per gateway log.
 
@@ -1424,9 +1573,9 @@ The CI workflow runs for pull requests and pushes to `main`.
 
 It:
 
-1. checks out the repository
-2. installs the Go version declared in `go.mod`
-3. runs `make verify`
+1. checks out the repository with `actions/checkout` pinned to a full immutable commit SHA
+2. installs the Go version declared in `go.mod` with `actions/setup-go` pinned to a full commit SHA
+3. runs the unified `make verify` gate, including Staticcheck and ShellCheck
 4. executes the Linux AMD64 binary with `-version`
 5. verifies the generated formats for:
    - Linux AMD64
@@ -1437,34 +1586,75 @@ It:
 
 The macOS and Windows binaries are cross-compiled and format-checked on the Linux runner. They are not executed by that runner.
 
+GitHub Actions dependencies are pinned to full commit SHAs rather than mutable major-version tags. Dependabot is configured to check:
+
+- Go modules every Monday at 06:00 America/Chicago, grouping minor/patch updates
+- GitHub Actions every Monday at 06:15 America/Chicago, grouping minor/patch updates
+
+Dependabot pull requests still pass through the normal repository validation/review path.
+
 # Release Workflow
 
-Releases are created through the manually triggered **Validate, Tag, and Release** GitHub Actions workflow.
+Releases are created through the manually triggered **Validate, Attest, Sign, Tag, and Release** GitHub Actions workflow. The caller uses least-privilege job permissions and delegates build/provenance generation to the separately maintained reusable workflow in `williamveith/fbs-interlock-gateway-builder`, pinned to an exact full commit SHA.
 
-The workflow:
+The workflow is split into three trust stages.
 
-1. requires the `main` branch
-2. checks out complete Git history and tags
-3. imports the protected release-signing GPG key
-4. validates the requested semantic version
-5. rejects an existing tag
-6. runs `make verify`
-7. builds all supported release binaries
-8. verifies asset existence
-9. verifies every SHA-256 checksum
-10. verifies binary formats and architectures
-11. verifies embedded version and commit metadata using the Linux AMD64 binary
-12. confirms that the build did not modify tracked files
-13. creates and locally verifies a GPG-signed annotated tag
-14. pushes the signed tag
-15. creates a GitHub release with generated notes and all validated assets
+## Preflight
 
-Required release-environment secrets:
+The preflight job:
+
+1. requires `refs/heads/main`
+2. checks out complete history without persisting checkout credentials
+3. validates the requested release version
+4. rejects a tag that already exists
+
+## Trusted build and provenance
+
+The caller invokes the pinned reusable trusted builder with only the permissions required for artifact/provenance work. The trusted builder performs the full repository validation and release build, validates the expected assets and embedded metadata, and generates SLSA v1 provenance for the release binaries and checksum files using GitHub-hosted infrastructure and GitHub OIDC/Sigstore.
+
+The build/provenance stage does not receive the long-lived GPG release-signing key or Ed25519 update-signing private key.
+
+## Verify, authorize, sign, and publish
+
+The protected `release` environment publish job:
+
+1. downloads the exact artifacts produced by the trusted builder
+2. re-verifies every SHA-256 checksum
+3. verifies SLSA provenance for every binary and checksum subject
+4. requires the expected repository, exact source commit, `refs/heads/main`, exact reusable-builder workflow and builder commit, SLSA v1 predicate, and GitHub-hosted runner
+5. loads the Ed25519 update-signing private key from the protected release environment
+6. signs each authenticated `.sha256` file and verifies every generated 64-byte signature
+7. executes the built Linux AMD64 binary's `verify-update-checksum` command to prove that the embedded public key matches the configured private signing key
+8. imports the protected GPG key only after build/provenance/update-authorization checks have succeeded
+9. creates and locally verifies a GPG-signed annotated tag at the exact source commit
+10. pushes the signed tag
+11. creates the GitHub Release with all five binaries, five checksum files, and five detached Ed25519 signatures
+12. waits for and verifies the immutable GitHub release attestation
+13. verifies every published release asset against the immutable-release attestation
+
+Required `release` environment secrets:
 
 ```text
 GPG_PRIVATE_KEY
 GPG_PASSPHRASE
+UPDATE_SIGNING_PRIVATE_KEY
 ```
+
+Required `release` environment variables used by GPG import/tagging:
+
+```text
+GPG_FINGERPRINT
+GIT_COMMITTER_NAME
+GIT_COMMITTER_EMAIL
+```
+
+The update-signing private key must correspond exactly to the public key committed at:
+
+```text
+internal/updateauth/update-signing-public.pem
+```
+
+The release workflow fails before publication when those keys do not match.
 
 Start the workflow with GitHub CLI:
 
@@ -1474,13 +1664,38 @@ gh workflow run release.yml \
   -f version=<version>
 ```
 
-After it succeeds:
+After it succeeds, verify the signed Git tag and immutable release:
 
 ```bash
 git fetch origin --tags
 git tag -v <version>
-gh release view <version>
+
+gh release verify <version> \
+  --repo williamveith/fbs-interlock-gateway
 ```
+
+Verify a downloaded release asset against the immutable release attestation:
+
+```bash
+gh release verify-asset <version> \
+  <asset> \
+  --repo williamveith/fbs-interlock-gateway
+```
+
+For a stronger build-origin check, verify SLSA provenance with the exact trusted-builder workflow revision and source commit recorded for that release:
+
+```bash
+gh attestation verify <asset> \
+  --repo williamveith/fbs-interlock-gateway \
+  --signer-workflow williamveith/fbs-interlock-gateway-builder/.github/workflows/build-release.yml \
+  --signer-digest <trusted-builder-commit-sha> \
+  --source-ref refs/heads/main \
+  --source-digest <release-source-commit-sha> \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
+```
+
+This release architecture is designed around a separated trusted-builder/provenance boundary; it should be described as a SLSA-hardened or SLSA Build Level 3-oriented design rather than as an external certification.
 
 # Branch and Pull-Request Workflow
 
@@ -1744,16 +1959,19 @@ Ignored local artifacts:
 ```gitignore
 .DS_Store
 build
-/tls/
 pki
 config.yaml
 config.yaml.bak
 *.patch
 ```
 
-`pki/` contains CA private keys, gateway certificate requests, and per-device Shelly keys. `/tls/` contains the staged gateway runtime trust and identity files. `build/` contains generated binaries, scripts, service definitions, TLS copies, and deployment-guide PDFs. Patch files are also ignored so local review or transfer patches are not committed accidentally.
+`pki/` contains private CA material, gateway certificate requests/identity material, and per-device Shelly keys. `build/` contains generated binaries, deployment scripts, service definitions, copied runtime TLS material, generated update files, and deployment-guide PDFs. Patch files are ignored so local review or transfer patches are not committed accidentally.
 
-Committed content includes source code, tests, certificate templates and generation helpers, service templates, workflows, Markdown deployment guides, and documentation. Production configuration, credentials, generated certificates, private keys, generated PDFs, and installed-state artifacts remain on controlled development or deployment machines.
+There is no repository-root generated `tls/` staging directory. Platform deployment builds copy the required runtime trust/identity files directly from `pki/ca/` and `pki/gateway/` into their generated `build/.../tls/` directories.
+
+Committed security material is limited to non-secret trust/configuration source such as certificate templates and `internal/updateauth/update-signing-public.pem`. The Ed25519 update-signing **private** key, GPG private key, CA private keys, production configuration, active credentials, generated certificates/CSRs, and production mappings must remain outside version control.
+
+`SECURITY.md` directs vulnerability reports to GitHub Private Vulnerability Reporting and defines operational-safety restrictions for testing against a system that can affect physical interlocks.
 
 # License
 

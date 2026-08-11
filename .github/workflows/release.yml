@@ -1,4 +1,4 @@
-name: Validate, Attest, Tag, and Release
+name: Validate, Attest, Sign, Tag, and Release
 
 on:
   workflow_dispatch:
@@ -78,14 +78,14 @@ jobs:
       version: ${{ inputs.version }}
 
   publish:
-    name: Verify provenance, sign, and publish
+    name: Verify provenance, authorize update, sign, and publish
     needs:
       - preflight
       - trusted-build
 
     environment: release
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     permissions:
       actions: read
@@ -103,6 +103,24 @@ jobs:
         with:
           name: trusted-release-${{ github.sha }}
           path: build/release
+
+      - name: Require publishing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          commands=(
+            gh
+            openssl
+            sha256sum
+          )
+
+          for command_name in "${commands[@]}"; do
+            if ! command -v "${command_name}" >/dev/null 2>&1; then
+              echo "Required command is unavailable: ${command_name}"
+              exit 1
+            fi
+          done
 
       - name: Verify release checksums
         working-directory: build/release
@@ -152,6 +170,92 @@ jobs:
               --deny-self-hosted-runners
           done
 
+      - name: Sign authenticated update checksums
+        shell: bash
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${UPDATE_SIGNING_PRIVATE_KEY}" ]]; then
+            echo "UPDATE_SIGNING_PRIVATE_KEY is not configured in the release environment."
+            exit 1
+          fi
+
+          private_key="${RUNNER_TEMP}/update-signing-private.pem"
+          public_key="${RUNNER_TEMP}/update-signing-public.pem"
+
+          umask 077
+          printf '%s' "${UPDATE_SIGNING_PRIVATE_KEY}" > "${private_key}"
+
+          trap 'rm -f "${private_key}" "${public_key}"' EXIT
+
+          openssl pkey \
+            -in "${private_key}" \
+            -pubout \
+            -out "${public_key}"
+
+          checksums=(
+            "build/release/fbs-interlock-gateway-linux-amd64.sha256"
+            "build/release/fbs-interlock-gateway-linux-arm64.sha256"
+            "build/release/fbs-interlock-gateway-windows-amd64.exe.sha256"
+            "build/release/fbs-interlock-gateway-darwin-arm64.sha256"
+            "build/release/fbs-interlock-gateway-darwin-amd64.sha256"
+          )
+
+          for checksum in "${checksums[@]}"; do
+            signature="${checksum}.sig"
+
+            echo "Signing ${checksum}"
+
+            openssl pkeyutl \
+              -sign \
+              -rawin \
+              -inkey "${private_key}" \
+              -in "${checksum}" \
+              -out "${signature}"
+
+            test "$(wc -c < "${signature}" | tr -d ' ')" -eq 64
+
+            openssl pkeyutl \
+              -verify \
+              -rawin \
+              -pubin \
+              -inkey "${public_key}" \
+              -in "${checksum}" \
+              -sigfile "${signature}"
+          done
+
+      - name: Verify embedded updater trust key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          binary="build/release/fbs-interlock-gateway-linux-amd64"
+          checksum="${binary}.sha256"
+          signature="${checksum}.sig"
+          asset="$(basename "${binary}")"
+
+          expected="$(
+            awk 'NF >= 1 { print tolower($1); exit }' "${checksum}"
+          )"
+
+          verified="$(
+            "${binary}" verify-update-checksum \
+              --checksum "${checksum}" \
+              --signature "${signature}" \
+              --asset "${asset}"
+          )"
+
+          if [[ "${verified}" != "${expected}" ]]; then
+            echo "Embedded update verifier returned the wrong checksum."
+            echo "Expected: ${expected}"
+            echo "Received: ${verified}"
+            exit 1
+          fi
+
+          echo "Embedded updater trust key verified."
+
       - name: Import release-signing key
         id: import-gpg
         uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
@@ -191,7 +295,7 @@ jobs:
 
           git push origin "refs/tags/${VERSION}"
 
-      - name: Create GitHub release
+      - name: Create immutable GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -202,14 +306,72 @@ jobs:
           gh release create "${VERSION}" \
             build/release/fbs-interlock-gateway-linux-amd64 \
             build/release/fbs-interlock-gateway-linux-amd64.sha256 \
+            build/release/fbs-interlock-gateway-linux-amd64.sha256.sig \
             build/release/fbs-interlock-gateway-linux-arm64 \
             build/release/fbs-interlock-gateway-linux-arm64.sha256 \
+            build/release/fbs-interlock-gateway-linux-arm64.sha256.sig \
             build/release/fbs-interlock-gateway-windows-amd64.exe \
             build/release/fbs-interlock-gateway-windows-amd64.exe.sha256 \
+            build/release/fbs-interlock-gateway-windows-amd64.exe.sha256.sig \
             build/release/fbs-interlock-gateway-darwin-arm64 \
             build/release/fbs-interlock-gateway-darwin-arm64.sha256 \
+            build/release/fbs-interlock-gateway-darwin-arm64.sha256.sig \
             build/release/fbs-interlock-gateway-darwin-amd64 \
             build/release/fbs-interlock-gateway-darwin-amd64.sha256 \
+            build/release/fbs-interlock-gateway-darwin-amd64.sha256.sig \
             --verify-tag \
             --generate-notes \
             --title "${VERSION}"
+
+      - name: Verify published immutable release and assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_verified=0
+
+          for attempt in {1..12}; do
+            if gh release verify "${VERSION}" \
+              --repo "${GITHUB_REPOSITORY}"; then
+              release_verified=1
+              break
+            fi
+
+            echo "Release attestation is not available yet; retrying..."
+            sleep 5
+          done
+
+          if [[ "${release_verified}" -ne 1 ]]; then
+            echo "ERROR: Immutable release attestation verification failed."
+            exit 1
+          fi
+
+          files=(
+            "build/release/fbs-interlock-gateway-linux-amd64"
+            "build/release/fbs-interlock-gateway-linux-amd64.sha256"
+            "build/release/fbs-interlock-gateway-linux-amd64.sha256.sig"
+            "build/release/fbs-interlock-gateway-linux-arm64"
+            "build/release/fbs-interlock-gateway-linux-arm64.sha256"
+            "build/release/fbs-interlock-gateway-linux-arm64.sha256.sig"
+            "build/release/fbs-interlock-gateway-windows-amd64.exe"
+            "build/release/fbs-interlock-gateway-windows-amd64.exe.sha256"
+            "build/release/fbs-interlock-gateway-windows-amd64.exe.sha256.sig"
+            "build/release/fbs-interlock-gateway-darwin-arm64"
+            "build/release/fbs-interlock-gateway-darwin-arm64.sha256"
+            "build/release/fbs-interlock-gateway-darwin-arm64.sha256.sig"
+            "build/release/fbs-interlock-gateway-darwin-amd64"
+            "build/release/fbs-interlock-gateway-darwin-amd64.sha256"
+            "build/release/fbs-interlock-gateway-darwin-amd64.sha256.sig"
+          )
+
+          for file in "${files[@]}"; do
+            echo "Verifying immutable release asset: ${file}"
+
+            gh release verify-asset \
+              "${VERSION}" \
+              "${file}" \
+              --repo "${GITHUB_REPOSITORY}"
+          done
