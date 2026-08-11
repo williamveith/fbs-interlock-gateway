@@ -104,6 +104,17 @@ jobs:
           name: trusted-release-${{ github.sha }}
           path: build/release
 
+      - name: Restore executable permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod 0755 \
+            build/release/fbs-interlock-gateway-linux-amd64 \
+            build/release/fbs-interlock-gateway-linux-arm64 \
+            build/release/fbs-interlock-gateway-darwin-amd64 \
+            build/release/fbs-interlock-gateway-darwin-arm64
+
       - name: Require publishing tools
         shell: bash
         run: |
