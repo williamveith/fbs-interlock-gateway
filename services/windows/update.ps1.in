@@ -17,11 +17,16 @@ $AssetName = "$AppName-windows-amd64.exe"
 $BaseUrl = "https://github.com/$Repository/releases/latest/download"
 $BinaryUrl = "$BaseUrl/$AssetName"
 $ChecksumUrl = "$BaseUrl/$AssetName.sha256"
+$SignatureUrl = "$BaseUrl/$AssetName.sha256.sig"
+
 $CurrentBinary = Join-Path $InstallDirectory "$AppName.exe"
 $LockDirectory = Join-Path $InstallDirectory '.update-lock'
 
 $MaximumLogBytes = 10MB
 $LogArchiveCount = 30
+
+# Windows PowerShell 5.1 may otherwise inherit an older .NET TLS default.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -77,16 +82,6 @@ function Assert-Amd64Binary {
     if ($machine -ne 0x8664) {
         throw ('The downloaded executable is not amd64. PE machine: 0x{0:X4}' -f $machine)
     }
-
-    $versionOutput = & $Path -version 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "The downloaded executable failed validation with exit code $LASTEXITCODE."
-    }
-
-    $versionText = ($versionOutput | Out-String).Trim()
-    if ($versionText) {
-        Write-Host "Downloaded version: $versionText"
-    }
 }
 
 function Get-Sha256 {
@@ -114,6 +109,7 @@ function Invoke-Download {
         }
         catch {
             $lastError = $_
+
             if ($attempt -lt 3) {
                 Start-Sleep -Seconds $attempt
             }
@@ -121,6 +117,104 @@ function Invoke-Download {
     }
 
     throw $lastError
+}
+
+function Get-AuthenticatedReleaseSha {
+    param(
+        [Parameter(Mandatory)][string]$ChecksumPath,
+        [Parameter(Mandatory)][string]$SignaturePath,
+        [Parameter(Mandatory)][string]$ExpectedAsset,
+        [Parameter(Mandatory)][string]$ErrorPath
+    )
+
+    $output = & $CurrentBinary `
+        verify-update-checksum `
+        --checksum $ChecksumPath `
+        --signature $SignaturePath `
+        --asset $ExpectedAsset `
+        2> $ErrorPath
+
+    $exitCode = $LASTEXITCODE
+
+    if ($exitCode -ne 0) {
+        if (Test-Path -LiteralPath $ErrorPath -PathType Leaf) {
+            $details = (Get-Content -LiteralPath $ErrorPath -Raw).Trim()
+            if ($details) {
+                [Console]::Error.WriteLine($details)
+            }
+        }
+
+        throw "Release checksum signature verification failed with exit code $exitCode."
+    }
+
+    $sha = (($output | Out-String).Trim()).ToLowerInvariant()
+
+    if ($sha -notmatch '^[0-9a-f]{64}$') {
+        throw 'Trusted checksum verifier returned an invalid SHA-256 value.'
+    }
+
+    return $sha
+}
+
+function Get-GatewayVersion {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $versionOutput = & $Path -version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Gateway version check failed for $Path with exit code $LASTEXITCODE."
+    }
+
+    $versionText = ($versionOutput | Out-String).Trim()
+    $match = [regex]::Match($versionText, '(?:^|\s)version=(v[^\s]+)')
+
+    if (-not $match.Success) {
+        throw "Could not read gateway version metadata from: $Path"
+    }
+
+    return $match.Groups[1].Value
+}
+
+function ConvertTo-StableSemVerParts {
+    param([Parameter(Mandatory)][string]$Value)
+
+    $match = [regex]::Match($Value, '^v([0-9]+)\.([0-9]+)\.([0-9]+)$')
+    if (-not $match.Success) {
+        throw "Automatic updates require a stable semantic version in the form vMAJOR.MINOR.PATCH: $Value"
+    }
+
+    try {
+        return @(
+            [UInt64]::Parse($match.Groups[1].Value),
+            [UInt64]::Parse($match.Groups[2].Value),
+            [UInt64]::Parse($match.Groups[3].Value)
+        )
+    }
+    catch {
+        throw "Semantic version component is too large: $Value"
+    }
+}
+
+function Assert-NotDowngrade {
+    param(
+        [Parameter(Mandatory)][string]$CurrentVersion,
+        [Parameter(Mandatory)][string]$CandidateVersion
+    )
+
+    $current = ConvertTo-StableSemVerParts -Value $CurrentVersion
+    $candidate = ConvertTo-StableSemVerParts -Value $CandidateVersion
+
+    for ($index = 0; $index -lt 3; $index++) {
+        if ($candidate[$index] -lt $current[$index]) {
+            throw "Refusing authenticated release downgrade from $CurrentVersion to $CandidateVersion."
+        }
+
+        if ($candidate[$index] -gt $current[$index]) {
+            return
+        }
+    }
+
+    # Equal versions are allowed so an authenticated release can repair a
+    # corrupted or otherwise different installed binary.
 }
 
 function Test-LogNeedsRotation {
@@ -210,8 +304,17 @@ if (-not (Test-Path -LiteralPath $InstallDirectory -PathType Container)) {
     throw "Install directory does not exist: $InstallDirectory"
 }
 
+if (-not (Test-Path -LiteralPath $CurrentBinary -PathType Leaf)) {
+    throw @"
+A trusted installed gateway executable is required:
+$CurrentBinary
+Run install.bat or perform the one-time signed-update bootstrap first.
+"@
+}
+
 if (Test-Path -LiteralPath $LockDirectory -PathType Container) {
     $lockAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $LockDirectory).LastWriteTimeUtc
+
     if ($lockAge.TotalHours -ge 2) {
         Remove-Item -LiteralPath $LockDirectory -Recurse -Force
     }
@@ -234,27 +337,31 @@ try {
     Write-Host "Checking the latest release for $AppName..."
     Write-Host 'Architecture: windows-amd64'
 
+    # The scheduled hourly path downloads only the tiny checksum and its
+    # 64-byte Ed25519 signature. The executable itself is downloaded only when
+    # the authenticated release checksum differs from the installed executable.
     $checksumPath = Join-Path $tempDirectory "$AssetName.sha256"
-    Write-Host 'Downloading the latest checksum...'
+    $signaturePath = Join-Path $tempDirectory "$AssetName.sha256.sig"
+    $verifyErrorPath = Join-Path $tempDirectory 'verify-update.err'
+
+    Write-Host 'Downloading the latest signed checksum...'
     Invoke-Download -Uri $ChecksumUrl -OutFile $checksumPath
+    Invoke-Download -Uri $SignatureUrl -OutFile $signaturePath
 
-    $checksumText = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
-    $expectedSha = ($checksumText -split '\s+')[0].ToLowerInvariant()
+    Write-Host 'Verifying release checksum signature...'
+    $expectedSha = Get-AuthenticatedReleaseSha `
+        -ChecksumPath $checksumPath `
+        -SignaturePath $signaturePath `
+        -ExpectedAsset $AssetName `
+        -ErrorPath $verifyErrorPath
 
-    if ($expectedSha -notmatch '^[0-9a-f]{64}$') {
-        throw 'The release checksum file contains an invalid SHA-256 value.'
-    }
+    Write-Host 'Release checksum signature verified.'
 
-    $updateRequired = $true
-    if (Test-Path -LiteralPath $CurrentBinary -PathType Leaf) {
-        $currentSha = Get-Sha256 -Path $CurrentBinary
-        Write-Host "Installed checksum: $currentSha"
-        Write-Host "Latest checksum:    $expectedSha"
+    $currentSha = Get-Sha256 -Path $CurrentBinary
+    Write-Host "Installed checksum: $currentSha"
+    Write-Host "Latest checksum:    $expectedSha"
 
-        if ($currentSha -eq $expectedSha) {
-            $updateRequired = $false
-        }
-    }
+    $updateRequired = ($currentSha -ne $expectedSha)
 
     $gatewayLog = Join-Path $LogDirectory 'gateway.log'
     $gatewayErrorLog = Join-Path $LogDirectory 'gateway-error.log'
@@ -264,36 +371,48 @@ try {
     if (-not $updateRequired -and
         -not $rotateGatewayLog -and
         -not $rotateGatewayErrorLog) {
-        Write-Host 'Already running the latest binary; logs are within limits.'
+        Write-Host 'Already running the latest authenticated binary; logs are within limits.'
         exit 0
     }
 
     $downloadPath = Join-Path $tempDirectory $AssetName
+
     if ($updateRequired) {
+        Write-Host 'A newer or different authenticated executable is available.'
         Write-Host 'Downloading the latest executable...'
         Invoke-Download -Uri $BinaryUrl -OutFile $downloadPath
 
+        Write-Host 'Verifying downloaded executable...'
         $downloadedSha = Get-Sha256 -Path $downloadPath
+
         if ($downloadedSha -ne $expectedSha) {
             throw @"
-Downloaded executable checksum mismatch.
+Downloaded executable checksum does not match the authenticated release checksum.
 Expected: $expectedSha
 Received: $downloadedSha
 "@
         }
 
+        Write-Host 'Downloaded executable checksum verified.'
+
         Assert-Amd64Binary -Path $downloadPath
+
+        $currentVersion = Get-GatewayVersion -Path $CurrentBinary
+        $candidateVersion = Get-GatewayVersion -Path $downloadPath
+
+        Write-Host "Installed version: $currentVersion"
+        Write-Host "Latest version:    $candidateVersion"
+
+        Assert-NotDowngrade `
+            -CurrentVersion $currentVersion `
+            -CandidateVersion $candidateVersion
     }
 
     $taskRegistered = Test-GatewayTaskRegistered
     $backupPath = $null
-    $existingAcl = $null
+    $existingAcl = Get-Acl -LiteralPath $CurrentBinary
 
-    if (Test-Path -LiteralPath $CurrentBinary -PathType Leaf) {
-        $existingAcl = Get-Acl -LiteralPath $CurrentBinary
-    }
-
-    if ($updateRequired -and (Test-Path -LiteralPath $CurrentBinary -PathType Leaf)) {
+    if ($updateRequired) {
         $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
         $backupPath = Join-Path $InstallDirectory "$AppName.exe.backup.$timestamp"
         Write-Host "Backing up the current executable: $backupPath"
@@ -320,21 +439,46 @@ Received: $downloadedSha
         $stagedPath = "$CurrentBinary.new"
         Copy-Item -LiteralPath $downloadPath -Destination $stagedPath -Force
 
-        if ((Get-Sha256 -Path $stagedPath) -ne $expectedSha) {
+        $stagedSha = Get-Sha256 -Path $stagedPath
+        if ($stagedSha -ne $expectedSha) {
             Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
-            throw 'The staged executable checksum is incorrect.'
+
+            if ($taskRegistered) {
+                Start-Gateway
+            }
+
+            throw @"
+The staged executable checksum is incorrect.
+Expected: $expectedSha
+Received: $stagedSha
+"@
         }
 
-        if (Test-Path -LiteralPath $CurrentBinary -PathType Leaf) {
-            [IO.File]::Replace($stagedPath, $CurrentBinary, $null, $true)
-        }
-        else {
-            Move-Item -LiteralPath $stagedPath -Destination $CurrentBinary -Force
+        [IO.File]::Replace($stagedPath, $CurrentBinary, $null, $true)
+        Set-Acl -LiteralPath $CurrentBinary -AclObject $existingAcl
+
+        $installedSha = Get-Sha256 -Path $CurrentBinary
+        if ($installedSha -ne $expectedSha) {
+            Write-Warning 'The installed executable checksum is incorrect.'
+
+            if ($backupPath -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+                Write-Warning 'Rolling back to the previous executable.'
+                Copy-Item -LiteralPath $backupPath -Destination $CurrentBinary -Force
+                Set-Acl -LiteralPath $CurrentBinary -AclObject $existingAcl
+            }
+
+            if ($taskRegistered) {
+                Start-Gateway
+            }
+
+            throw @"
+Installed executable checksum mismatch.
+Expected: $expectedSha
+Received: $installedSha
+"@
         }
 
-        if ($null -ne $existingAcl) {
-            Set-Acl -LiteralPath $CurrentBinary -AclObject $existingAcl
-        }
+        Write-Host 'Installed executable checksum verified.'
     }
 
     if ($taskRegistered) {
@@ -348,13 +492,7 @@ Received: $downloadedSha
             if ($backupPath -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
                 Write-Warning 'Rolling back to the previous executable.'
                 Copy-Item -LiteralPath $backupPath -Destination $CurrentBinary -Force
-
-                if ($null -ne $existingAcl) {
-                    Set-Acl -LiteralPath $CurrentBinary -AclObject $existingAcl
-                }
-            }
-            else {
-                Remove-Item -LiteralPath $CurrentBinary -Force -ErrorAction SilentlyContinue
+                Set-Acl -LiteralPath $CurrentBinary -AclObject $existingAcl
             }
 
             Start-Gateway
