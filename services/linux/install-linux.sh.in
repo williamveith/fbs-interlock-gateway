@@ -5,6 +5,8 @@ APP="@APP@"
 INSTALL_DIR="@INSTALL_DIR@"
 CONFIG_DIR="@CONFIG_DIR@"
 CONFIG_PATH="@CONFIG_PATH@"
+STATE_DIR="/var/lib/${APP}"
+DB_PATH="${STATE_DIR}/gateway.db"
 TLS_DIR="@TLS_DIR@"
 SERVICE_USER="@SERVICE_USER@"
 SERVICE_GROUP="@SERVICE_GROUP@"
@@ -12,6 +14,7 @@ SERVICE_NAME="${APP}.service"
 
 FBS_SOURCE_IP="@FBS_SOURCE_IP@"
 FBS_PORT_RANGE="@FBS_PORT_RANGE@"
+ADMIN_STATUS_URL="http://127.0.0.1:18090/api/status"
 
 REQUIRED_PACKAGES=(
   lsof
@@ -39,28 +42,83 @@ SERVER_CA_PATH="${TLS_DIR}/server-ca.crt"
 CLIENT_CERT_PATH="${TLS_DIR}/gateway-client.crt"
 CLIENT_KEY_PATH="${TLS_DIR}/gateway-client.key"
 
+SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 UPDATE_SERVICE_SRC="${SOURCE_DIR}/${APP}-update.service"
 UPDATE_TIMER_SRC="${SOURCE_DIR}/${APP}-update.timer"
 UPDATE_SERVICE_NAME="${APP}-update.service"
 UPDATE_TIMER_NAME="${APP}-update.timer"
+UPDATE_SERVICE_PATH="/etc/systemd/system/${UPDATE_SERVICE_NAME}"
+UPDATE_TIMER_PATH="/etc/systemd/system/${UPDATE_TIMER_NAME}"
 
-echo "Installing ${APP} from:"
-echo "  ${SOURCE_DIR}"
-echo
+DEVELOPMENT_INSTALL=false
+
+usage() {
+  cat <<USAGE
+Usage: sudo ./install.sh [--development]
+
+  --development  Install the local build while disabling managed updates.
+USAGE
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --development)
+      DEVELOPMENT_INSTALL=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: Unknown option: $1"
+      usage
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 if [[ "$(id -u)" -ne 0 ]]; then
+  escalation_args=()
+  if [[ "$DEVELOPMENT_INSTALL" == true ]]; then
+    escalation_args+=(--development)
+  fi
+
   if command -v pkexec >/dev/null 2>&1; then
     exec pkexec env \
       DISPLAY="${DISPLAY:-}" \
       XAUTHORITY="${XAUTHORITY:-}" \
-      bash "$0" "$@"
-  else
-    echo "Administrator privileges are required."
-    echo "Run this script with:"
-    echo "  sudo ${SOURCE_DIR}/install.sh"
+      bash "$0" "${escalation_args[@]}"
+  fi
+
+  if command -v sudo >/dev/null 2>&1; then
+    exec sudo "$0" "${escalation_args[@]}"
+  fi
+
+  echo "ERROR: Administrator privileges are required."
+  echo "Run this script as root."
+  exit 1
+fi
+
+echo "Installing ${APP} from:"
+echo "  ${SOURCE_DIR}"
+if [[ "$DEVELOPMENT_INSTALL" == true ]]; then
+  echo "Mode: development"
+else
+  echo "Mode: production"
+fi
+echo
+
+require_file() {
+  local path="$1"
+  local description="$2"
+
+  if [[ ! -f "$path" ]]; then
+    echo "ERROR: Missing ${description}:"
+    echo "  ${path}"
     exit 1
   fi
-fi
+}
 
 install_missing_dependencies() {
   local missing_packages=()
@@ -180,44 +238,196 @@ configure_ufw() {
   echo
 }
 
+unit_exists() {
+  systemctl cat "$1" >/dev/null 2>&1
+}
+
+unit_enabled() {
+  systemctl is-enabled --quiet "$1" >/dev/null 2>&1
+}
+
+unit_active() {
+  systemctl is-active --quiet "$1" >/dev/null 2>&1
+}
+
+stop_unit() {
+  local unit_name="$1"
+
+  if unit_exists "$unit_name" || unit_active "$unit_name"; then
+    systemctl stop "$unit_name" >/dev/null 2>&1 || true
+  fi
+}
+
+wait_for_admin() {
+  local attempt=0
+
+  while [[ "$attempt" -lt 20 ]]; do
+    if curl \
+      --fail \
+      --silent \
+      --show-error \
+      --max-time 2 \
+      "$ADMIN_STATUS_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+
+  return 1
+}
+
+verify_database_directory_access() {
+  local write_test="${STATE_DIR}/.gateway-write-test.$$"
+
+  echo "Verifying SQLite storage access as ${SERVICE_USER}..."
+
+  if ! (
+    cd /
+    runuser -u "$SERVICE_USER" -- touch "$write_test"
+  ); then
+    echo "ERROR: Service user cannot create files in:"
+    echo "  $STATE_DIR"
+    rm -f "$write_test"
+    return 1
+  fi
+
+  if ! (
+    cd /
+    runuser -u "$SERVICE_USER" -- rm -f "$write_test"
+  ); then
+    echo "ERROR: Service user cannot remove files from:"
+    echo "  $STATE_DIR"
+    rm -f "$write_test"
+    return 1
+  fi
+}
+
+verify_database_file() {
+  echo "Verifying the SQLite configuration database..."
+
+  if [[ ! -s "$DB_PATH" ]]; then
+    echo "ERROR: Gateway did not create a non-empty SQLite database:"
+    echo "  $DB_PATH"
+    return 1
+  fi
+
+  if ! (
+    cd /
+    runuser -u "$SERVICE_USER" -- /bin/sh -c \
+      'test -r "$1" && test -w "$1"' sh "$DB_PATH"
+  ); then
+    echo "ERROR: Service user cannot read and write:"
+    echo "  $DB_PATH"
+    return 1
+  fi
+}
+
+BACKUP_DIR="$(mktemp -d)"
+MAIN_WAS_ENABLED=false
+MAIN_WAS_ACTIVE=false
+UPDATE_TIMER_WAS_ENABLED=false
+UPDATE_TIMER_WAS_ACTIVE=false
+ROLLBACK_ACTIVE=false
+
+cleanup() {
+  rm -rf "$BACKUP_DIR"
+}
+trap cleanup EXIT
+
+backup_path() {
+  local path="$1"
+  local key="$2"
+
+  if [[ -e "$path" ]]; then
+    cp -a "$path" "$BACKUP_DIR/$key"
+  else
+    : > "$BACKUP_DIR/$key.absent"
+  fi
+}
+
+restore_path() {
+  local path="$1"
+  local key="$2"
+
+  if [[ -e "$BACKUP_DIR/$key" ]]; then
+    rm -rf "$path"
+    mkdir -p "$(dirname "$path")"
+    cp -a "$BACKUP_DIR/$key" "$path"
+  elif [[ -e "$BACKUP_DIR/$key.absent" ]]; then
+    rm -rf "$path"
+  fi
+}
+
+restore_unit_state() {
+  local unit_name="$1"
+  local was_enabled="$2"
+  local was_active="$3"
+
+  if [[ "$was_enabled" == true ]]; then
+    systemctl enable "$unit_name" >/dev/null 2>&1 || true
+  else
+    systemctl disable "$unit_name" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$was_active" == true ]]; then
+    systemctl start "$unit_name" >/dev/null 2>&1 || true
+  fi
+}
+
+rollback_install() {
+  if [[ "$ROLLBACK_ACTIVE" == true ]]; then
+    return
+  fi
+  ROLLBACK_ACTIVE=true
+
+  echo
+  echo "Rolling back the failed Linux installation..."
+
+  set +e
+  stop_unit "$UPDATE_TIMER_NAME"
+  stop_unit "$UPDATE_SERVICE_NAME"
+  stop_unit "$SERVICE_NAME"
+
+  restore_path "$INSTALL_DIR" "install-dir"
+  restore_path "$SERVICE_PATH" "main-service"
+  restore_path "$UPDATE_SERVICE_PATH" "update-service"
+  restore_path "$UPDATE_TIMER_PATH" "update-timer"
+
+  rm -f "${DB_PATH}-journal" "${DB_PATH}-wal" "${DB_PATH}-shm"
+  restore_path "$DB_PATH" "gateway-db"
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  restore_unit_state "$SERVICE_NAME" "$MAIN_WAS_ENABLED" "$MAIN_WAS_ACTIVE"
+  restore_unit_state "$UPDATE_TIMER_NAME" "$UPDATE_TIMER_WAS_ENABLED" "$UPDATE_TIMER_WAS_ACTIVE"
+  systemctl reset-failed \
+    "$SERVICE_NAME" \
+    "$UPDATE_SERVICE_NAME" \
+    "$UPDATE_TIMER_NAME" \
+    >/dev/null 2>&1 || true
+  set -e
+}
+
 install_missing_dependencies
 configure_ufw
 
-if [[ ! -f "$BIN_SRC" ]]; then
-  echo "ERROR: Missing application binary:"
-  echo "  $BIN_SRC"
-  exit 1
+require_file "$BIN_SRC" "application binary"
+require_file "$CONFIG_SRC" "config file"
+require_file "$SERVICE_SRC" "systemd service file"
+require_file "$UNINSTALL_SRC" "uninstaller"
+require_file "$SERVER_CA_SRC" "Shelly server CA certificate"
+require_file "$CLIENT_CERT_SRC" "gateway client certificate"
+require_file "$CLIENT_KEY_SRC" "gateway client private key"
+
+if [[ "$DEVELOPMENT_INSTALL" == false ]]; then
+  require_file "$UPDATE_SRC" "update script"
+  require_file "$UPDATE_SERVICE_SRC" "auto-update systemd service"
+  require_file "$UPDATE_TIMER_SRC" "auto-update systemd timer"
 fi
 
-if [[ ! -f "$CONFIG_SRC" ]]; then
-  echo "ERROR: Missing config file:"
-  echo "  $CONFIG_SRC"
-  exit 1
-fi
-
-if [[ ! -f "$SERVICE_SRC" ]]; then
-  echo "ERROR: Missing service file:"
-  echo "  $SERVICE_SRC"
-  exit 1
-fi
-
-if [[ ! -f "$UNINSTALL_SRC" ]]; then
-  echo "ERROR: Missing uninstaller:"
-  echo "  $UNINSTALL_SRC"
-  exit 1
-fi
-
-for tls_source in   "$SERVER_CA_SRC"   "$CLIENT_CERT_SRC"   "$CLIENT_KEY_SRC"
-do
-  if [[ ! -f "$tls_source" ]]; then
-    echo "ERROR: Missing gateway TLS file:"
-    echo "  $tls_source"
-    echo
-    echo "Build the Linux deployment only after generating the gateway"
-    echo "certificate and populating the repository tls/ directory."
-    exit 1
-  fi
-done
+echo "Validating application binary..."
+"$BIN_SRC" -version
 
 echo "Creating service group/user if needed..."
 
@@ -235,6 +445,30 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     "$SERVICE_USER"
 fi
 
+if unit_enabled "$SERVICE_NAME"; then
+  MAIN_WAS_ENABLED=true
+fi
+if unit_active "$SERVICE_NAME"; then
+  MAIN_WAS_ACTIVE=true
+fi
+if unit_enabled "$UPDATE_TIMER_NAME"; then
+  UPDATE_TIMER_WAS_ENABLED=true
+fi
+if unit_active "$UPDATE_TIMER_NAME"; then
+  UPDATE_TIMER_WAS_ACTIVE=true
+fi
+
+echo "Stopping existing systemd units..."
+stop_unit "$UPDATE_TIMER_NAME"
+stop_unit "$UPDATE_SERVICE_NAME"
+stop_unit "$SERVICE_NAME"
+
+backup_path "$INSTALL_DIR" "install-dir"
+backup_path "$SERVICE_PATH" "main-service"
+backup_path "$UPDATE_SERVICE_PATH" "update-service"
+backup_path "$UPDATE_TIMER_PATH" "update-timer"
+backup_path "$DB_PATH" "gateway-db"
+
 echo "Creating install directory..."
 install -d \
   -o root \
@@ -250,7 +484,6 @@ install \
   "$BIN_SRC" \
   "$INSTALL_DIR/$APP"
 
-
 echo "Installing uninstall.sh..."
 install \
   -o root \
@@ -259,6 +492,24 @@ install \
   "$UNINSTALL_SRC" \
   "$INSTALL_DIR/uninstall.sh"
 
+if [[ "$DEVELOPMENT_INSTALL" == false ]]; then
+  echo "Installing checksum-aware updater..."
+  install \
+    -o root \
+    -g root \
+    -m 0755 \
+    "$UPDATE_SRC" \
+    "$INSTALL_DIR/update.sh"
+else
+  echo "Development install: removing managed updater files..."
+  rm -f \
+    "$INSTALL_DIR/update.sh" \
+    "$UPDATE_SERVICE_PATH" \
+    "$UPDATE_TIMER_PATH"
+  systemctl disable "$UPDATE_TIMER_NAME" "$UPDATE_SERVICE_NAME" \
+    >/dev/null 2>&1 || true
+fi
+
 echo "Creating config directory..."
 install -d \
   -o "$SERVICE_USER" \
@@ -266,6 +517,12 @@ install -d \
   -m 0750 \
   "$CONFIG_DIR"
 
+echo "Creating persistent state directory..."
+install -d \
+  -o "$SERVICE_USER" \
+  -g "$SERVICE_GROUP" \
+  -m 0750 \
+  "$STATE_DIR"
 
 echo "Creating TLS directory..."
 install -d \
@@ -333,75 +590,112 @@ else
   chmod 0640 "$CONFIG_PATH"
 fi
 
+echo "Verifying configuration and TLS access as ${SERVICE_USER}..."
+for readable_path in \
+  "$CONFIG_PATH" \
+  "$SERVER_CA_PATH" \
+  "$CLIENT_CERT_PATH" \
+  "$CLIENT_KEY_PATH"
+do
+  if ! runuser -u "$SERVICE_USER" -- test -r "$readable_path"; then
+    echo "ERROR: Service user cannot read:"
+    echo "  $readable_path"
+    rollback_install
+    exit 1
+  fi
+done
+
+if ! verify_database_directory_access; then
+  rollback_install
+  exit 1
+fi
+
 echo "Installing systemd service..."
 install \
   -o root \
   -g root \
   -m 0644 \
   "$SERVICE_SRC" \
-  "/etc/systemd/system/$SERVICE_NAME"
+  "$SERVICE_PATH"
 
-if [[ -f "$UPDATE_SERVICE_SRC" ]]; then
+if [[ "$DEVELOPMENT_INSTALL" == false ]]; then
   echo "Installing auto-update service..."
-
   install \
     -o root \
     -g root \
     -m 0644 \
     "$UPDATE_SERVICE_SRC" \
-    "/etc/systemd/system/$UPDATE_SERVICE_NAME"
-fi
+    "$UPDATE_SERVICE_PATH"
 
-if [[ -f "$UPDATE_TIMER_SRC" ]]; then
   echo "Installing auto-update timer..."
-
   install \
     -o root \
     -g root \
     -m 0644 \
     "$UPDATE_TIMER_SRC" \
-    "/etc/systemd/system/$UPDATE_TIMER_NAME"
+    "$UPDATE_TIMER_PATH"
 fi
-
-if [[ -f "$UPDATE_SRC" ]]; then
-  echo "Installing update.sh..."
-
-  install \
-    -o root \
-    -g root \
-    -m 0755 \
-    "$UPDATE_SRC" \
-    "$INSTALL_DIR/update.sh"
-fi
-
-echo "Verifying gateway TLS file access..."
-
-for tls_path in   "$SERVER_CA_PATH"   "$CLIENT_CERT_PATH"   "$CLIENT_KEY_PATH"
-do
-  if ! runuser -u "$SERVICE_USER" -- test -r "$tls_path"; then
-    echo "ERROR: Service user cannot read TLS file:"
-    echo "  $tls_path"
-    exit 1
-  fi
-done
 
 echo "Reloading systemd..."
 systemctl daemon-reload
 
-echo "Enabling service..."
+echo "Enabling gateway service..."
 systemctl enable "$SERVICE_NAME"
 
-if [[ -f "/etc/systemd/system/$UPDATE_TIMER_NAME" ]]; then
-  echo "Enabling auto-update timer..."
-  systemctl enable --now "$UPDATE_TIMER_NAME"
+echo "Starting gateway service..."
+if ! systemctl restart "$SERVICE_NAME"; then
+  echo "ERROR: Gateway service could not be started."
+  rollback_install
+  exit 1
 fi
 
-echo "Restarting service..."
-systemctl restart "$SERVICE_NAME"
+if ! wait_for_admin; then
+  echo "ERROR: The Admin API did not become ready."
+  systemctl --no-pager --full status "$SERVICE_NAME" || true
+  journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+  rollback_install
+  exit 1
+fi
+
+if ! verify_database_file; then
+  rollback_install
+  exit 1
+fi
+
+if [[ "$DEVELOPMENT_INSTALL" == false ]]; then
+  echo "Enabling hourly auto-update timer..."
+  if ! systemctl enable --now "$UPDATE_TIMER_NAME"; then
+    echo "ERROR: The auto-update timer could not be enabled."
+    rollback_install
+    exit 1
+  fi
+else
+  echo "Managed automatic updates remain disabled for development testing."
+fi
 
 echo
-echo "Install complete."
+echo "Installed binary:"
+"$INSTALL_DIR/$APP" -version
+echo
+echo "Gateway service:"
+systemctl --no-pager --full status "$SERVICE_NAME" || true
+echo
+echo "Admin API is responding at:"
+echo "  ${ADMIN_STATUS_URL}"
+echo
+echo "Authoritative SQLite configuration:"
+echo "  ${DB_PATH}"
+echo "Legacy YAML / rollback mirror:"
+echo "  ${CONFIG_PATH}"
+echo "Gateway TLS:"
+echo "  ${TLS_DIR}"
+echo
+
+if [[ "$DEVELOPMENT_INSTALL" == true ]]; then
+  echo "Development install complete."
+  echo "Run the normal install.sh to restore managed auto-updates."
+else
+  echo "Production install complete."
+fi
+
 echo "Uninstaller: ${INSTALL_DIR}/uninstall.sh"
-echo
-
-systemctl --no-pager --full status "$SERVICE_NAME"

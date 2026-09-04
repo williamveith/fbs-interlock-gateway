@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily FBS Interlock Gateway update check
+Description=Hourly FBS Interlock Gateway update check
 
 [Timer]
 OnBootSec=5min

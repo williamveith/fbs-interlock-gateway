@@ -15,15 +15,34 @@ import (
 	"github.com/williamveith/fbs-interlock-gateway/internal/status"
 )
 
+type ConfigPersistence interface {
+	Replace(config.Config) error
+}
+
+type fileConfigPersistence struct {
+	path string
+}
+
+func (p fileConfigPersistence) Replace(cfg config.Config) error {
+	return config.WriteAtomic(p.path, cfg)
+}
+
 type Gateway struct {
-	mu          sync.RWMutex
-	cfg         config.Config
-	configPath  string
-	adminAddr   string
-	safeOutput  bool
-	shelly      *shelly.Client
+	mu sync.RWMutex
+
+	cfg config.Config
+
+	persistence ConfigPersistence
+
+	adminAddr string
+
+	safeOutput bool
+
+	shelly *shelly.Client
+
 	statusStore *status.Store
-	initErr     error
+
+	initErr error
 }
 
 func New(
@@ -31,7 +50,16 @@ func New(
 	configPath string,
 	adminAddr string,
 ) *Gateway {
+	return NewWithStore(cfg, fileConfigPersistence{path: configPath}, adminAddr)
+}
+
+func NewWithStore(
+	cfg config.Config,
+	persistence ConfigPersistence,
+	adminAddr string,
+) *Gateway {
 	config.ApplyDefaults(&cfg)
+
 	cfg = config.Clone(cfg)
 
 	shellyClient, err := shelly.NewClientWithTLS(
@@ -41,7 +69,7 @@ func New(
 
 	return &Gateway{
 		cfg:         cfg,
-		configPath:  configPath,
+		persistence: persistence,
 		adminAddr:   adminAddr,
 		safeOutput:  config.SafeOutput(cfg),
 		shelly:      shellyClient,
@@ -52,9 +80,13 @@ func New(
 
 func (g *Gateway) Run(ctx context.Context) error {
 	g.mu.RLock()
+
 	cfg := g.cfg
+
 	adminAddr := g.adminAddr
+
 	initErr := g.initErr
+
 	g.mu.RUnlock()
 
 	if initErr != nil {
@@ -69,14 +101,19 @@ func (g *Gateway) Run(ctx context.Context) error {
 	defer cancel()
 
 	restartRequested := make(chan struct{}, 1)
+
 	errCh := make(chan error, len(cfg.Tools)+1)
+
 	var wg sync.WaitGroup
 
 	if adminAddr != "" {
 		adminServer := admin.New(adminAddr, g, g.shelly, g.statusStore, restartRequested)
+
 		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
+
 			if err := adminServer.Run(runCtx); err != nil {
 				errCh <- err
 			}
@@ -86,6 +123,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 	}
 
 	fbsServer := fbs.NewServer(cfg.Bind, g.SafeOutput(), g.shelly, g.statusStore)
+
 	enabledCount := 0
 
 	for _, tool := range cfg.Tools {
@@ -95,15 +133,17 @@ func (g *Gateway) Run(ctx context.Context) error {
 		}
 
 		enabledCount++
-
 		if err := process.KillPort(tool.Port); err != nil {
 			log.Printf("warning: failed to clear port %d for tool=%s: %v", tool.Port, tool.InterlockName, err)
 		}
 
 		tool := tool
+
 		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
+
 			if err := fbsServer.RunToolServer(runCtx, tool); err != nil {
 				errCh <- err
 			}
@@ -139,6 +179,7 @@ func (g *Gateway) ConfigSnapshot() config.Config {
 func (g *Gateway) SafeOutput() bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+
 	return g.safeOutput
 }
 
@@ -149,8 +190,10 @@ func (g *Gateway) UpdateConfig(newCfg config.Config) error {
 	if err := config.Validate(newCfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
-
-	if err := config.WriteAtomic(g.configPath, newCfg); err != nil {
+	if g.persistence == nil {
+		return fmt.Errorf("failed to write config: no configuration persistence store configured")
+	}
+	if err := g.persistence.Replace(newCfg); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 

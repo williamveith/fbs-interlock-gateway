@@ -5,6 +5,8 @@ APP="@APP@"
 INSTALL_DIR="@INSTALL_DIR@"
 CONFIG_DIR="@CONFIG_DIR@"
 CONFIG_PATH="@CONFIG_PATH@"
+STATE_DIR="/var/lib/${APP}"
+DB_PATH="${STATE_DIR}/gateway.db"
 TLS_DIR="@TLS_DIR@"
 SERVICE_USER="@SERVICE_USER@"
 SERVICE_GROUP="@SERVICE_GROUP@"
@@ -27,10 +29,12 @@ usage() {
   cat <<USAGE
 Usage: sudo ./uninstall.sh [--purge]
 
-Without --purge, the production configuration and gateway TLS files are kept.
+Without --purge, the authoritative SQLite database, YAML rollback mirror,
+and gateway TLS files are preserved.
 
 Options:
-  --purge    Also remove ${CONFIG_DIR}, including config.yaml and TLS files.
+  --purge    Also remove ${CONFIG_DIR} and ${STATE_DIR}, including gateway.db,
+             config.yaml, and TLS files.
   -h, --help Show this help text.
 USAGE
 }
@@ -150,20 +154,22 @@ echo "Removing installed application files..."
 rm -rf "$INSTALL_DIR"
 
 if [[ "$PURGE" == true ]]; then
-  echo "Purging configuration and gateway TLS files..."
-  rm -rf "$CONFIG_DIR"
+  echo "Purging persistent configuration, SQLite state, and gateway TLS files..."
+  rm -rf "$CONFIG_DIR" "$STATE_DIR"
 fi
 
 echo
 echo "Uninstall complete."
 
 if [[ "$PURGE" == false ]]; then
-  echo "The production configuration was preserved at:"
+  echo "The authoritative SQLite database was preserved at:"
+  echo "  $DB_PATH"
+  echo "The YAML rollback mirror was preserved at:"
   echo "  $CONFIG_PATH"
   echo "The gateway TLS files were preserved at:"
   echo "  $TLS_DIR"
 else
-  echo "Persistent gateway configuration and TLS data were removed."
+  echo "Persistent gateway configuration, SQLite state, and TLS data were removed."
 fi
 
 echo "The ${SERVICE_USER} service account and ${SERVICE_GROUP} group were preserved for safe reinstallation."

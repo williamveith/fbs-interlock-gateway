@@ -3,4 +3,6 @@ build
 pki
 config.yaml
 config.yaml.bak
-*.patch
+*.db-journal
+*.db-wal
+*.db-shm
