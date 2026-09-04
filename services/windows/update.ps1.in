@@ -452,7 +452,7 @@ Received: $downloadedSha
 
     $taskRegistered = Test-GatewayTaskRegistered
     $backupPath = $null
-    $databaseBackupPath = Join-Path $tempDirectory 'gateway.db.backup'
+    $databaseBackupPath = Join-Path $tempDirectory 'gateway.sqlite3.backup'
     $databaseExisted = Test-Path -LiteralPath $DatabasePath -PathType Leaf
     $databaseAcl = $null
     if ($databaseExisted) {

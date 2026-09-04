@@ -6,7 +6,7 @@ INSTALL_DIR="@INSTALL_DIR@"
 CONFIG_DIR="@CONFIG_DIR@"
 CONFIG_PATH="@CONFIG_PATH@"
 STATE_DIR="/var/lib/${APP}"
-DB_PATH="${STATE_DIR}/gateway.db"
+DB_PATH="${STATE_DIR}/gateway.sqlite3"
 TLS_DIR="@TLS_DIR@"
 SERVICE_USER="@SERVICE_USER@"
 SERVICE_GROUP="@SERVICE_GROUP@"
@@ -313,14 +313,11 @@ verify_database_file() {
     return 1
   fi
 
-  if ! (
-    cd /
-    runuser -u "$SERVICE_USER" -- /bin/sh -c \
-      'test -r "$1" && test -w "$1"' sh "$DB_PATH"
-  ); then
-    echo "ERROR: Service user cannot read and write:"
+  if ! runuser -u "$SERVICE_USER" -- test -r "$DB_PATH" ||
+    ! runuser -u "$SERVICE_USER" -- test -w "$DB_PATH"; then
+    echo "ERROR: Service user cannot read/write SQLite database:"
     echo "  $DB_PATH"
-    return 1
+    exit 1
   fi
 }
 

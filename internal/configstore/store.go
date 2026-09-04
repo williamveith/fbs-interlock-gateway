@@ -459,7 +459,7 @@ func writeGeneratedMirror(path string, cfg config.Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal compatibility YAML: %w", err)
 	}
-	header := []byte("# GENERATED FILE. SQLite gateway.db is authoritative.\n# Manual changes to this file are ignored after database initialization.\n")
+	header := []byte("# GENERATED FILE. SQLite gateway.sqlite3 is authoritative.\n# Manual changes to this file are ignored after database initialization.\n")
 	data := append(header, body...)
 
 	if oldData, err := os.ReadFile(absolutePath); err == nil {

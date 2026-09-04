@@ -12,7 +12,7 @@ import (
 )
 
 func TestStoreRoundTrip(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "gateway.db")
+	dbPath := filepath.Join(t.TempDir(), "gateway.sqlite3")
 	store, err := Open(dbPath, Options{})
 	if err != nil {
 		t.Fatalf("Open returned an error: %v", err)
@@ -41,7 +41,7 @@ func TestStoreRoundTrip(t *testing.T) {
 }
 
 func TestReplacePreservesStableToolIDWhenPortChanges(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"), Options{})
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
 	if err != nil {
 		t.Fatalf("Open returned an error: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestReplacePreservesStableToolIDWhenPortChanges(t *testing.T) {
 }
 
 func TestReplaceDoesNotCollideNewAndPreservedIDs(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"), Options{})
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
 	if err != nil {
 		t.Fatalf("Open returned an error: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestReplaceDoesNotCollideNewAndPreservedIDs(t *testing.T) {
 }
 
 func TestReplaceRejectsInvalidConfigWithoutChangingDatabase(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"), Options{})
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
 	if err != nil {
 		t.Fatalf("Open returned an error: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestCompatibilityMirrorIsGeneratedAfterReplace(t *testing.T) {
 		t.Fatalf("failed to write original YAML: %v", err)
 	}
 
-	store, err := Open(filepath.Join(tempDir, "gateway.db"), Options{MirrorPath: mirrorPath})
+	store, err := Open(filepath.Join(tempDir, "gateway.sqlite3"), Options{MirrorPath: mirrorPath})
 	if err != nil {
 		t.Fatalf("Open returned an error: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCompatibilityMirrorIsGeneratedAfterReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read generated mirror: %v", err)
 	}
-	if !strings.HasPrefix(string(contents), "# GENERATED FILE. SQLite gateway.db is authoritative.") {
+	if !strings.HasPrefix(string(contents), "# GENERATED FILE. SQLite gateway.sqlite3 is authoritative.") {
 		t.Fatalf("missing generated mirror header: %q", contents)
 	}
 	if !strings.Contains(string(contents), "interlock-new.example.local") {
@@ -168,7 +168,7 @@ func TestCompatibilityMirrorIsGeneratedAfterReplace(t *testing.T) {
 }
 
 func TestOpenRejectsNewerSchema(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "gateway.db"), Options{})
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
 	if err != nil {
 		t.Fatalf("Open returned an error: %v", err)
 	}

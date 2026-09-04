@@ -152,7 +152,7 @@ func resolveRuntimeDBPath(flagValue, configPath string) string {
 		return value
 	}
 
-	return filepath.Join(filepath.Dir(configPath), "gateway.db")
+	return filepath.Join(filepath.Dir(configPath), "gateway.sqlite3")
 }
 
 func defaultPaths() (paths, error) {
@@ -163,7 +163,7 @@ func defaultPaths() (paths, error) {
 	dir := filepath.Dir(exePath)
 	dbPath := strings.TrimSpace(os.Getenv(dbPathEnv))
 	if dbPath == "" {
-		dbPath = filepath.Join(dir, "gateway.db")
+		dbPath = filepath.Join(dir, "gateway.sqlite3")
 	}
 	return paths{
 		db:   dbPath,

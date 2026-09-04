@@ -11,7 +11,7 @@ import (
 
 func TestLoadOrMigrateImportsLegacyYAMLOnce(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "gateway.db")
+	dbPath := filepath.Join(dir, "gateway.sqlite3")
 	configPath := filepath.Join(dir, "config.yaml")
 
 	legacy := `bind: 127.0.0.1

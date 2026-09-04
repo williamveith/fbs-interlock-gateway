@@ -64,7 +64,7 @@ function Preserve-PersistentDataInsideInstallDirectory {
     try {
         $items = @(
             @{ Path = $ConfigPath; Name = 'config.yaml' },
-            @{ Path = $DatabasePath; Name = 'gateway.db' },
+            @{ Path = $DatabasePath; Name = 'gateway.sqlite3' },
             @{ Path = $TlsDirectory; Name = 'tls' },
             @{ Path = $LogDirectory; Name = 'logs' }
         )

@@ -6,7 +6,7 @@ INSTALL_DIR="@INSTALL_DIR@"
 CONFIG_DIR="@CONFIG_DIR@"
 CONFIG_PATH="@CONFIG_PATH@"
 STATE_DIR="/var/lib/${APP}"
-DB_PATH="${STATE_DIR}/gateway.db"
+DB_PATH="${STATE_DIR}/gateway.sqlite3"
 TLS_DIR="@TLS_DIR@"
 SERVICE_USER="@SERVICE_USER@"
 SERVICE_GROUP="@SERVICE_GROUP@"
@@ -33,7 +33,7 @@ Without --purge, the authoritative SQLite database, YAML rollback mirror,
 and gateway TLS files are preserved.
 
 Options:
-  --purge    Also remove ${CONFIG_DIR} and ${STATE_DIR}, including gateway.db,
+  --purge    Also remove ${CONFIG_DIR} and ${STATE_DIR}, including gateway.sqlite3,
              config.yaml, and TLS files.
   -h, --help Show this help text.
 USAGE

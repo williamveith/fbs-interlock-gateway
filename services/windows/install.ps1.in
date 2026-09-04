@@ -681,7 +681,7 @@ function Restore-PreviousInstallation {
     Remove-Item -LiteralPath "$DatabasePath-journal" -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$DatabasePath-wal" -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "$DatabasePath-shm" -Force -ErrorAction SilentlyContinue
-    Restore-Path -Path $DatabasePath -Key 'gateway.db' -BackupDirectory $BackupDirectory
+    Restore-Path -Path $DatabasePath -Key 'gateway.sqlite3' -BackupDirectory $BackupDirectory
 
     if (Test-Path -LiteralPath $DatabasePath -PathType Leaf) {
         Set-RestrictedFileAcl `
@@ -753,7 +753,7 @@ try {
     Backup-Path -Path $StartScriptDestination -Key 'start.bat' -BackupDirectory $backupDirectory
     Backup-Path -Path $UpdateScriptDestination -Key 'update.ps1' -BackupDirectory $backupDirectory
     Backup-Path -Path $UpdateBatchDestination -Key 'update.bat' -BackupDirectory $backupDirectory
-    Backup-Path -Path $DatabasePath -Key 'gateway.db' -BackupDirectory $backupDirectory
+    Backup-Path -Path $DatabasePath -Key 'gateway.sqlite3' -BackupDirectory $backupDirectory
 
     Install-ApplicationFiles
     Set-InstalledPermissions

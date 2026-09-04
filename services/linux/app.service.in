@@ -16,7 +16,7 @@ WorkingDirectory=@CONFIG_DIR@
 # maintains this directory for fresh installs and reboots.
 StateDirectory=@APP@
 StateDirectoryMode=0750
-ExecStart=@INSTALL_DIR@/@APP@ -config @CONFIG_PATH@ -db /var/lib/@APP@/gateway.db
+ExecStart=@INSTALL_DIR@/@APP@ -config @CONFIG_PATH@ -db /var/lib/@APP@/gateway.sqlite3
 
 StandardOutput=journal
 StandardError=journal
