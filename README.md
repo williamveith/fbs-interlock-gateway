@@ -127,8 +127,8 @@ Use this README for project-wide behavior and architecture, including the author
 # Capabilities
 
 - one FBS-facing listener port per configured tool
-- FBS-compatible `/status`, `/on`, and `/off` endpoints
-- supported query-based on/off command formats
+- strict FBS request contract accepting only exact `GET /status`, `GET /on`, and `GET /off` requests with no query string
+- rejection of unsupported FBS methods, query strings, and non-exact paths before any Shelly operation
 - Shelly Gen2/Gen3 RPC over per-tool `http` or `https`
 - optional Shelly HTTP Digest Authentication with reusable per-device digest sessions
 - optional mutual TLS with Shelly server verification and gateway client authentication
@@ -336,7 +336,7 @@ internal/configstore/
   integrity checks, stable tool IDs, and YAML compatibility mirrors
 
 internal/fbs/
-  FBS-compatible HTTP request handling, responses, and status recording
+  strict FBS HTTP request validation, FBS-compatible responses, and status recording
 
 internal/gateway/
   application lifecycle, listener startup, restart, configuration ownership,
@@ -416,24 +416,43 @@ The FBS server does not impose a fixed three-second response write deadline. The
 
 ## Endpoints
 
+The FBS-facing listener accepts only these exact requests:
+
+```text
+GET /status
+GET /on
+GET /off
+```
+
+For a configured tool port, those correspond to:
+
 ```text
 http://<gateway-host>:<port>/status
 http://<gateway-host>:<port>/on
 http://<gateway-host>:<port>/off
 ```
 
-The gateway also accepts common query-based command formats:
+Request matching is intentionally strict:
 
-```text
-?turn=on
-?turn=off
-?state=1
-?state=0
-?value=1
-?value=0
-```
+- the HTTP method must be `GET`
+- the path must be exactly `/status`, `/on`, or `/off`
+- path matching is case-sensitive
+- the request must not contain a query string
+- rejected requests do not call the Shelly client and do not modify the shared status store
 
-Responses remain intentionally simple for FBS compatibility:
+Examples such as `/ON`, `/on/`, `/?state=1`, `/on?state=1`, `/something/on`, and `/statusblah` are not accepted.
+
+Rejected request classes use normal HTTP error responses rather than FBS state JSON:
+
+| Request | Response |
+| --- | --- |
+| Non-`GET` method | `405 Method Not Allowed` |
+| Any non-empty query string | `400 Bad Request` |
+| Any other path | `404 Not Found` |
+
+Source authorization remains a deployment/firewall responsibility. The application does not duplicate the configured FBS source address in the request handler; Linux UFW, Windows Defender Firewall, or the macOS Packet Filter rule restricts access to the generated `FBS_SOURCE_IP`.
+
+Responses for accepted FBS operations remain intentionally simple for compatibility:
 
 ```json
 {"Success":1,"State":1}
@@ -1101,7 +1120,7 @@ make verify
 2. `go.mod` and `go.sum` consistency checks
 3. `go vet ./...`
 4. `go tool staticcheck ./...`
-5. all Go tests under the race detector, including SQLite configuration round trips/migration, Admin/FBS preemption, incremental fleet refresh, independent configuration-copy, shared-status, Digest, TLS, retry/recovery, and signed-update authorization tests
+5. all Go tests under the race detector, including SQLite configuration round trips/migration, strict FBS request-shape validation, Admin/FBS preemption, incremental fleet refresh, independent configuration-copy, shared-status, Digest, TLS, retry/recovery, and signed-update authorization tests
 6. Bash syntax checks for top-level helpers, TLS helpers, and Linux/macOS deployment scripts
 7. ShellCheck across `scripts/` and `services/` shell source/templates
 8. PowerShell parser validation for the Windows installer, updater, and uninstaller when `pwsh` is available
@@ -2018,12 +2037,25 @@ curl \
 
 Add `--anyauth -u "admin:<password>"` when the HTTPS Shelly also requires Digest Authentication.
 
-Test through the gateway:
+Test accepted FBS requests through the gateway:
 
 ```bash
 curl "http://<gateway-host>:<port>/status"
 curl "http://<gateway-host>:<port>/on"
 curl "http://<gateway-host>:<port>/off"
+```
+
+The FBS-facing parser is deliberately exact. Useful negative checks are:
+
+```bash
+# Query strings are rejected with 400.
+curl -i "http://<gateway-host>:<port>/on?state=1"
+
+# Unsupported methods are rejected with 405.
+curl -i -X POST "http://<gateway-host>:<port>/on"
+
+# Non-exact paths are rejected with 404.
+curl -i "http://<gateway-host>:<port>/ON"
 ```
 
 # Runtime Behavior
@@ -2050,7 +2082,8 @@ On startup, the gateway:
 
 During operation:
 
-- ordinary FBS/Shelly requests use the in-memory configuration; SQLite is not queried on every request
+- FBS-facing requests are accepted only as exact `GET /status`, `GET /on`, or `GET /off` requests with no query string; rejected requests never reach the Shelly client or shared status store
+- ordinary accepted FBS/Shelly requests use the in-memory configuration; SQLite is not queried on every request
 - ordinary Admin status polling reads memory only
 - an explicit Admin refresh queries enabled tools with up to 32 workers
 - refresh results are published independently as each device completes
@@ -2107,7 +2140,7 @@ phase=response_headers
 phase=response_body
 ```
 
-They also report whether the HTTP connection was reused and whether the TLS session resumed. FBS status and set failures are logged before the configured safe state is returned.
+They also report whether the HTTP connection was reused and whether the TLS session resumed. FBS status and set failures are logged before the configured safe state is returned. Invalid FBS request shapes are logged as rejected method, query, or path events and return the corresponding HTTP error without changing relay or shared-status state.
 
 Platform logs:
 
