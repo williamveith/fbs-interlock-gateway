@@ -100,44 +100,48 @@ func (s *Server) RunToolServer(ctx context.Context, tool config.Tool) error {
 }
 
 func (s *Server) handleFBSRequest(w http.ResponseWriter, r *http.Request, tool config.Tool) {
-	path := strings.ToLower(r.URL.Path)
-	query := strings.ToLower(r.URL.RawQuery)
-	full := path + "?" + query
-
 	logFBSRequest(tool, r)
 
-	switch {
-	case strings.Contains(full, "status"):
+	if r.Method != http.MethodGet {
+		log.Printf(
+			"tool=%s rejected_method method=%s path=%s",
+			tool.InterlockName,
+			r.Method,
+			r.URL.Path,
+		)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if r.URL.RawQuery != "" {
+		log.Printf(
+			"tool=%s rejected_query path=%s query=%s",
+			tool.InterlockName,
+			r.URL.Path,
+			r.URL.RawQuery,
+		)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	switch r.URL.Path {
+	case "/status":
 		s.handleStatus(w, r, tool)
 
-	case isOnRequest(full):
+	case "/on":
 		s.handleSet(w, r, tool, true)
 
-	case isOffRequest(full):
+	case "/off":
 		s.handleSet(w, r, tool, false)
 
 	default:
-		log.Printf("tool=%s unknown_request path=%s query=%s", tool.InterlockName, r.URL.Path, r.URL.RawQuery)
-		writeFBS(w, false)
+		log.Printf(
+			"tool=%s rejected_path path=%s",
+			tool.InterlockName,
+			r.URL.Path,
+		)
+		http.NotFound(w, r)
 	}
-}
-
-func isOnRequest(s string) bool {
-	return strings.Contains(s, "/on") ||
-		strings.Contains(s, "turn=on") ||
-		strings.Contains(s, "state=on") ||
-		strings.Contains(s, "state=1") ||
-		strings.Contains(s, "value=1") ||
-		strings.Contains(s, "true")
-}
-
-func isOffRequest(s string) bool {
-	return strings.Contains(s, "/off") ||
-		strings.Contains(s, "turn=off") ||
-		strings.Contains(s, "state=off") ||
-		strings.Contains(s, "state=0") ||
-		strings.Contains(s, "value=0") ||
-		strings.Contains(s, "false")
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, tool config.Tool) {

@@ -5,6 +5,7 @@ APP="@APP@"
 INSTALL_DIR="@MACOS_INSTALL_DIR@"
 CONFIG_DIR="@MACOS_CONFIG_DIR@"
 CONFIG_PATH="@MACOS_CONFIG_PATH@"
+DB_PATH="${CONFIG_DIR}/gateway.sqlite3"
 TLS_DIR="@MACOS_TLS_DIR@"
 LOG_DIR="@MACOS_LOG_DIR@"
 SERVICE_USER="@MACOS_SERVICE_USER@"
@@ -305,6 +306,52 @@ wait_for_admin() {
   return 1
 }
 
+verify_database_directory_access() {
+  local write_test="${CONFIG_DIR}/.gateway-write-test.$$"
+
+  echo "Verifying SQLite storage access as ${SERVICE_USER}..."
+
+  if ! (
+    cd /
+    sudo -u "$SERVICE_USER" /usr/bin/touch "$write_test"
+  ); then
+    echo "ERROR: Service account cannot create files in:"
+    echo "  $CONFIG_DIR"
+    rm -f "$write_test"
+    return 1
+  fi
+
+  if ! (
+    cd /
+    sudo -u "$SERVICE_USER" /bin/rm -f "$write_test"
+  ); then
+    echo "ERROR: Service account cannot remove files from:"
+    echo "  $CONFIG_DIR"
+    rm -f "$write_test"
+    return 1
+  fi
+}
+
+verify_database_file() {
+  echo "Verifying the SQLite configuration database..."
+
+  if [[ ! -s "$DB_PATH" ]]; then
+    echo "ERROR: Gateway did not create a non-empty SQLite database:"
+    echo "  $DB_PATH"
+    return 1
+  fi
+
+  if ! (
+    cd /
+    sudo -u "$SERVICE_USER" /bin/test -r "$DB_PATH" &&
+      sudo -u "$SERVICE_USER" /bin/test -w "$DB_PATH"
+  ); then
+    echo "ERROR: Service account cannot read and write:"
+    echo "  $DB_PATH"
+    return 1
+  fi
+}
+
 BACKUP_DIR="$(mktemp -d)"
 MAIN_WAS_LOADED=false
 UPDATE_WAS_LOADED=false
@@ -357,6 +404,10 @@ rollback_install() {
   restore_path "$INSTALL_DIR/update.sh" "update"
   restore_path "$PLIST_PATH" "main-plist"
   restore_path "$UPDATE_PLIST_PATH" "update-plist"
+
+  rm -f "${DB_PATH}-journal" "${DB_PATH}-wal" "${DB_PATH}-shm"
+  restore_path "$DB_PATH" "gateway-db"
+
   restore_path "$PF_ANCHOR_PATH" "pf-anchor"
   restore_path "$PF_CONF" "pf-conf"
 
@@ -364,14 +415,14 @@ rollback_install() {
     /sbin/pfctl -f "$PF_CONF" >/dev/null 2>&1
 
   if [[ "$MAIN_WAS_LOADED" == true && -f "$PLIST_PATH" ]]; then
-    launchctl bootstrap system "$PLIST_PATH" >/dev/null 2>&1
-    launchctl enable "system/${LAUNCHD_LABEL}" >/dev/null 2>&1
-    launchctl kickstart -k "system/${LAUNCHD_LABEL}" >/dev/null 2>&1
+    launchctl enable "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+    launchctl bootstrap system "$PLIST_PATH" >/dev/null 2>&1 || true
+    launchctl kickstart -k "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
   fi
 
   if [[ "$UPDATE_WAS_LOADED" == true && -f "$UPDATE_PLIST_PATH" ]]; then
-    launchctl bootstrap system "$UPDATE_PLIST_PATH" >/dev/null 2>&1
-    launchctl enable "system/${UPDATE_LAUNCHD_LABEL}" >/dev/null 2>&1
+    launchctl enable "system/${UPDATE_LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+    launchctl bootstrap system "$UPDATE_PLIST_PATH" >/dev/null 2>&1 || true
   fi
   set -e
 }
@@ -406,6 +457,10 @@ if job_loaded "$UPDATE_LAUNCHD_LABEL"; then
   UPDATE_WAS_LOADED=true
 fi
 
+echo "Stopping existing LaunchDaemons..."
+unload_job "$UPDATE_LAUNCHD_LABEL" "$UPDATE_PLIST_PATH"
+unload_job "$LAUNCHD_LABEL" "$PLIST_PATH"
+
 backup_path "$INSTALL_DIR/$APP" "app"
 backup_path "$INSTALL_DIR/start.sh" "start"
 backup_path "$INSTALL_DIR/update.sh" "update"
@@ -413,10 +468,7 @@ backup_path "$PLIST_PATH" "main-plist"
 backup_path "$UPDATE_PLIST_PATH" "update-plist"
 backup_path "$PF_ANCHOR_PATH" "pf-anchor"
 backup_path "$PF_CONF" "pf-conf"
-
-echo "Stopping existing LaunchDaemons..."
-unload_job "$UPDATE_LAUNCHD_LABEL" "$UPDATE_PLIST_PATH"
-unload_job "$LAUNCHD_LABEL" "$PLIST_PATH"
+backup_path "$DB_PATH" "gateway-db"
 
 echo "Creating the application directory..."
 install -d -o root -g "$SERVICE_GROUP" -m 0750 "$INSTALL_DIR"
@@ -513,6 +565,11 @@ do
   fi
 done
 
+if ! verify_database_directory_access; then
+  rollback_install
+  exit 1
+fi
+
 echo "Installing the gateway LaunchDaemon..."
 install -o root -g wheel -m 0644 "$PLIST_SRC" "$PLIST_PATH"
 plutil -lint "$PLIST_PATH" >/dev/null
@@ -530,16 +587,23 @@ fi
 
 configure_application_firewall
 
+echo "Enabling the gateway LaunchDaemon..."
+launchctl enable "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+
 echo "Loading and starting the gateway LaunchDaemon..."
 if ! launchctl bootstrap system "$PLIST_PATH"; then
   rollback_install
   exit 1
 fi
-launchctl enable "system/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
 launchctl kickstart -k "system/${LAUNCHD_LABEL}"
 
 if ! wait_for_admin; then
   echo "ERROR: The Admin API did not become ready."
+  rollback_install
+  exit 1
+fi
+
+if ! verify_database_file; then
   rollback_install
   exit 1
 fi
@@ -566,6 +630,11 @@ launchctl print "system/${LAUNCHD_LABEL}" |
 echo
 echo "Admin API is responding at:"
 echo "  ${ADMIN_STATUS_URL}"
+echo
+echo "Authoritative SQLite configuration:"
+echo "  ${DB_PATH}"
+echo "Legacy YAML / rollback mirror:"
+echo "  ${CONFIG_PATH}"
 echo
 echo "Packet Filter permits only @FBS_SOURCE_IP@ to TCP ports @FBS_PORT_RANGE@."
 echo "The macOS Application Firewall entry is also installed."

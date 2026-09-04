@@ -2,7 +2,7 @@
 title: "FBS Interlock Gateway"
 subtitle: "Project Overview and Operations Reference"
 author: "William Veith"
-date: "2026-08-10"
+date: "2026-09-04"
 lang: en-US
 ---
 
@@ -45,6 +45,16 @@ lang: en-US
   - [GET /api/status](#get-apistatus)
   - [GET /api/status?refresh=1](#get-apistatusrefresh1)
   - [POST /api/restart](#post-apirestart)
+- [Configuration storage](#configuration-storage)
+  - [Storage model](#storage-model)
+  - [First-run migration](#first-run-migration)
+  - [Admin changes](#admin-changes)
+  - [Import and export](#import-and-export)
+  - [Installed paths](#installed-paths)
+    - [Linux](#linux)
+    - [Windows](#windows)
+    - [macOS](#macos)
+  - [Security](#security)
 - [Configuration](#configuration)
   - [Config Fields](#config-fields)
   - [Validation](#validation)
@@ -53,15 +63,15 @@ lang: en-US
 - [Building Deployment Packages](#building-deployment-packages)
   - [Prepare Runtime TLS Files](#prepare-runtime-tls-files)
   - [Deployment-Guide PDF Requirements](#deployment-guide-pdf-requirements)
-  - [Linux](#linux)
+  - [Linux](#linux-1)
   - [Windows AMD64](#windows-amd64)
   - [macOS Apple Silicon](#macos-apple-silicon)
   - [macOS Intel](#macos-intel)
   - [Generate Template-Derived Files Only](#generate-template-derived-files-only)
   - [Generate Deployment-Guide PDFs Only](#generate-deployment-guide-pdfs-only)
 - [Deployment Build Output](#deployment-build-output)
-  - [Linux](#linux-1)
-  - [Windows](#windows)
+  - [Linux](#linux-2)
+  - [Windows](#windows-1)
   - [macOS ARM64](#macos-arm64)
   - [macOS AMD64](#macos-amd64)
 - [Release Binaries](#release-binaries)
@@ -112,13 +122,13 @@ The repository covers the complete interlock system boundary: application behavi
 | [Shelly Interlock Hardware Guide](<docs/hardware/Shelly Interlock Hardware Guide.md>) | Junction-box materials, per-assembly bills of materials, wiring configurations, label artwork, QR device identity, fabrication, verification, and maintenance |
 | [Security Policy](SECURITY.md) | Supported versions, private vulnerability reporting, operational-safety limits, secret handling, coordinated disclosure, and safe-harbor expectations |
 
-Use this README for project-wide behavior and architecture. Use the platform guides for installation and operations, and use the hardware guide for physical interlock construction and audit documentation.
+Use this README for project-wide behavior and architecture, including the authoritative SQLite configuration-storage model. Use the platform guides for installation and operations, and use the hardware guide for physical interlock construction and audit documentation.
 
 # Capabilities
 
 - one FBS-facing listener port per configured tool
-- FBS-compatible `/status`, `/on`, and `/off` endpoints
-- supported query-based on/off command formats
+- strict FBS request contract accepting only exact `GET /status`, `GET /on`, and `GET /off` requests with no query string
+- rejection of unsupported FBS methods, query strings, and non-exact paths before any Shelly operation
 - Shelly Gen2/Gen3 RPC over per-tool `http` or `https`
 - optional Shelly HTTP Digest Authentication with reusable per-device digest sessions
 - optional mutual TLS with Shelly server verification and gateway client authentication
@@ -138,7 +148,10 @@ Use this README for project-wide behavior and architecture. Use the platform gui
 - visible disconnected, safe-output, protocol, and error states
 - editable per-tool protocol and gateway mutual-TLS file paths
 - password masking and preservation in the Admin API
-- validated, atomic configuration writes with `.bak` backups
+- an authoritative local SQLite configuration store in `gateway.sqlite3`
+- one-time migration from legacy `config.yaml`, followed by generated YAML rollback/compatibility mirrors with `.bak` preservation
+- transactional configuration replacement with schema constraints and database integrity checks
+- `config export` and `config import` commands, including redacted YAML export for review
 - deep-cloned configuration snapshots that prevent unintended shared-state mutation
 - Linux AMD64 and ARM64 deployment packages with runtime TLS files and rendered PDF guides
 - Windows AMD64 deployment packages with runtime TLS files, production/development installers, managed updates, and rendered PDF guides
@@ -178,10 +191,10 @@ Important operational rules:
 - A successful `Switch.Set` result updates the Admin status cache to the requested state, but only a later `Switch.GetStatus` independently verifies the device output.
 - Production gateway listener ports should be reachable only from the authorized FBS source.
 - The Admin UI should remain bound to a loopback address unless remote access is intentionally secured.
-- Shelly credentials are stored locally in `config.yaml`.
+- Shelly credentials are stored locally in the authoritative `gateway.sqlite3` database and can also appear in generated YAML rollback/compatibility mirrors and non-redacted exports. Protect all of these as sensitive configuration.
 - Gateway TLS private keys and private CA material must remain outside version control.
 - Deployment packages contain only the gateway runtime trust certificate, gateway client certificate, and gateway client private key. CA private keys, CSRs, `client-ca.crt`, and per-device Shelly private keys remain on the certificate-management machine.
-- Existing installed configurations and TLS identities are preserved during normal reinstallation on all supported platforms.
+- Existing installed SQLite configuration state, YAML rollback/compatibility state, and TLS identities are preserved during normal reinstallation on all supported platforms.
 - Real credentials, certificates, private keys, and production mappings must not be committed to the repository.
 
 ## Platform Firewall Behavior
@@ -304,7 +317,8 @@ The diagrams document the associated interlock hardware but do not replace quali
 ```text
 cmd/fbs-interlock-gateway/
   main.go
-    application entry point, CLI flags, version output, signal handling
+    application entry point, runtime/config CLI flags, version output,
+    first-run migration, YAML import/export, and signal handling
 
 internal/admin/
   server.go
@@ -314,11 +328,15 @@ internal/admin/
     and FBS-priority Admin status behavior
 
 internal/config/
-  YAML loading, relative-path resolution, defaults, validation,
-  deep cloning, atomic writes, and backups
+  YAML loading/serialization, relative-path resolution, defaults,
+  validation, deep cloning, and legacy file persistence support
+
+internal/configstore/
+  SQLite schema and migrations, transactional configuration replacement,
+  integrity checks, stable tool IDs, and YAML compatibility mirrors
 
 internal/fbs/
-  FBS-compatible HTTP request handling, responses, and status recording
+  strict FBS HTTP request validation, FBS-compatible responses, and status recording
 
 internal/gateway/
   application lifecycle, listener startup, restart, configuration ownership,
@@ -398,24 +416,43 @@ The FBS server does not impose a fixed three-second response write deadline. The
 
 ## Endpoints
 
+The FBS-facing listener accepts only these exact requests:
+
+```text
+GET /status
+GET /on
+GET /off
+```
+
+For a configured tool port, those correspond to:
+
 ```text
 http://<gateway-host>:<port>/status
 http://<gateway-host>:<port>/on
 http://<gateway-host>:<port>/off
 ```
 
-The gateway also accepts common query-based command formats:
+Request matching is intentionally strict:
 
-```text
-?turn=on
-?turn=off
-?state=1
-?state=0
-?value=1
-?value=0
-```
+- the HTTP method must be `GET`
+- the path must be exactly `/status`, `/on`, or `/off`
+- path matching is case-sensitive
+- the request must not contain a query string
+- rejected requests do not call the Shelly client and do not modify the shared status store
 
-Responses remain intentionally simple for FBS compatibility:
+Examples such as `/ON`, `/on/`, `/?state=1`, `/on?state=1`, `/something/on`, and `/statusblah` are not accepted.
+
+Rejected request classes use normal HTTP error responses rather than FBS state JSON:
+
+| Request | Response |
+| --- | --- |
+| Non-`GET` method | `405 Method Not Allowed` |
+| Any non-empty query string | `400 Bad Request` |
+| Any other path | `404 Not Found` |
+
+Source authorization remains a deployment/firewall responsibility. The application does not duplicate the configured FBS source address in the request handler; Linux UFW, Windows Defender Firewall, or the macOS Packet Filter rule restricts access to the generated `FBS_SOURCE_IP`.
+
+Responses for accepted FBS operations remain intentionally simple for compatibility:
 
 ```json
 {"Success":1,"State":1}
@@ -695,6 +732,7 @@ Set an explicit address:
 ```bash
 ./fbs-interlock-gateway \
   -config config.yaml \
+  -db gateway.sqlite3 \
   -admin 127.0.0.1:18090
 ```
 
@@ -703,6 +741,7 @@ Disable the Admin UI:
 ```bash
 ./fbs-interlock-gateway \
   -config config.yaml \
+  -db gateway.sqlite3 \
   -admin ""
 ```
 
@@ -744,7 +783,7 @@ An omitted tool protocol is returned as `http`.
 
 ## `PUT /api/config`
 
-Accepts edited configuration, validates it, preserves existing passwords unless replacement or clearing is explicitly requested, writes the file atomically, and creates `config.yaml.bak` from the previous file when possible.
+Accepts edited configuration, validates it, preserves existing passwords unless replacement or clearing is explicitly requested, and replaces the authoritative configuration in one SQLite transaction. After a successful database commit, the configured compatibility mirror is regenerated as YAML and its previous contents are preserved as `config.yaml.bak` when possible. The SQLite commit remains authoritative even if the compatibility-mirror write later fails.
 
 The request can update:
 
@@ -802,15 +841,144 @@ Refresh results are merged by tool and revision. A result from an older scan can
 
 Requests a clean process restart. The platform service supervisor starts the process again in an installed deployment.
 
+# Configuration storage
+
+The gateway uses SQLite as the authoritative persistent configuration store.
+
+The in-memory runtime model remains `config.Config`; SQLite is a persistence implementation detail and is not queried on each FBS or Shelly request.
+
+## Storage model
+
+- `gateway.sqlite3` is authoritative after initialization.
+- `config.yaml` is accepted as a legacy first-run import source.
+- The original YAML is left untouched during the first import.
+- After a successful Admin configuration change, the gateway writes a generated YAML compatibility snapshot and moves the previous YAML to `config.yaml.bak`.
+- Live relay/status state remains in memory and is not persisted to SQLite.
+- TLS keys and certificates remain ordinary protected files; their paths are stored in the database.
+
+The SQLite connection is intentionally conservative:
+
+- one database connection
+- rollback-journal (`DELETE`) mode
+- `synchronous=FULL`
+- foreign keys enabled
+- 5-second busy timeout
+- `PRAGMA quick_check(1)` on open
+- schema versioning through `PRAGMA user_version`
+
+The database must be local to the gateway host. Do not place `gateway.sqlite3` on NFS, SMB, or another network filesystem for active/passive sharing. Replicate configuration between gateway hosts explicitly instead.
+
+## First-run migration
+
+Fresh platform installers and generated service wrappers pass both the legacy YAML path and the platform-specific authoritative database path explicitly.
+
+On Linux, for example:
+
+```text
+fbs-interlock-gateway \
+  -config /etc/fbs-interlock-gateway/config.yaml \
+  -db /var/lib/fbs-interlock-gateway/gateway.sqlite3
+```
+
+Windows `start.bat` and macOS `start.sh` likewise pass explicit `-config` and `-db` paths. The binary also accepts `FBS_GATEWAY_DB_PATH` when `-db` is omitted. If neither is supplied, the database defaults to `gateway.sqlite3` beside the selected `config.yaml`.
+
+Startup behavior is deterministic:
+
+1. Open and integrity-check `gateway.sqlite3`.
+2. Apply any supported database schema migrations.
+3. If the database already contains configuration, load it and ignore manual edits to `config.yaml`.
+4. If the database is uninitialized, load and validate `config.yaml`.
+5. Resolve relative TLS paths while loading the YAML.
+6. Import the complete configuration in one SQLite transaction.
+7. Re-load the imported configuration from SQLite before starting listeners.
+
+If the database is uninitialized and the legacy YAML is absent or invalid, the gateway refuses to start.
+
+## Admin changes
+
+The existing Admin API remains unchanged. `PUT /api/config` still validates the complete proposed configuration before accepting it, but persistence is now a SQLite transaction rather than an authoritative YAML rewrite. A successful save still requests a process restart so listeners, TLS state, the Shelly transport, and status structures are rebuilt exactly as before. After the SQLite commit, the configured YAML compatibility mirror is regenerated and the previous YAML is preserved as `config.yaml.bak` when possible.
+
+Database constraints additionally prevent invalid ports, invalid booleans, invalid protocols, invalid switch IDs, duplicate listener ports, and invalid singleton settings from being committed.
+
+## Import and export
+
+Export the authoritative database as YAML:
+
+```text
+fbs-interlock-gateway config export \
+  -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 \
+  -output fleet.yaml
+```
+
+A redacted export for review can be created with:
+
+```text
+fbs-interlock-gateway config export \
+  -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 \
+  -output fleet-redacted.yaml \
+  -redact-secrets
+```
+
+A redacted export replaces stored passwords with the literal value `REDACTED`. Do not import a redacted review copy unless that literal value is intentionally supposed to become the stored password.
+
+Import a complete YAML configuration transactionally:
+
+```text
+fbs-interlock-gateway config import \
+  -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 \
+  -input fleet.yaml
+```
+
+Add `-mirror-config <path>` to `config import` when a generated compatibility snapshot should also be maintained.
+
+The import validates and replaces the complete database configuration in one transaction. Restart the supervised gateway afterward so listeners, TLS state, Shelly transports, status structures, and per-device scheduling state are rebuilt from the imported configuration.
+
+Exports written to a file are created atomically with private file permissions. Non-redacted exports contain stored credentials and must be protected accordingly.
+
+## Installed paths
+
+Recommended production paths are:
+
+### Linux
+
+```text
+/opt/fbs-interlock-gateway/fbs-interlock-gateway
+/etc/fbs-interlock-gateway/config.yaml            # legacy/rollback mirror
+/etc/fbs-interlock-gateway/tls/...
+/var/lib/fbs-interlock-gateway/gateway.sqlite3    # authoritative
+```
+
+### Windows
+
+```text
+C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe
+C:\FBS\fbs-interlock-gateway\config.yaml          # legacy/rollback mirror
+C:\FBS\fbs-interlock-gateway\tls\...
+C:\FBS\fbs-interlock-gateway\gateway.sqlite3
+```
+
+### macOS
+
+```text
+/usr/local/libexec/fbs-interlock-gateway/fbs-interlock-gateway
+/Library/Application Support/fbs-interlock-gateway/config.yaml
+/Library/Application Support/fbs-interlock-gateway/tls/...
+/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3
+```
+
+Standard uninstall preserves the authoritative database, YAML rollback/compatibility state, and TLS identity. Purge removes the persistent database along with the other preserved application state.
+
+## Security
+
+SQLite changes editability and transactional behavior; it is not encryption.
+
+Shelly passwords stored in `gateway.sqlite3` remain recoverable by an account that can read the database. Protect the database with the same OS-level access controls used for the existing production configuration. Do not commit production `gateway.sqlite3`, configuration exports containing credentials, or generated compatibility YAML files to source control.
+
 # Configuration
 
-The service loads YAML from the path supplied with `-config`.
+The gateway's runtime configuration model remains `config.Config`. YAML is still used for first-run initialization, compatibility mirrors, and explicit import/export workflows, but SQLite is authoritative after initialization.
 
-When `-config` is omitted, the gateway looks for `config.yaml` beside the executable.
-
-Relative mutual-TLS paths are resolved against the directory containing the loaded configuration file. For example, when the installed config is `/etc/fbs-interlock-gateway/config.yaml`, `./tls/server-ca.crt` resolves to `/etc/fbs-interlock-gateway/tls/server-ca.crt`. Windows and macOS installers likewise run the gateway with their configuration directories as the working directory.
-
-Create a starter config:
+Create a starter YAML configuration for first-run/local initialization:
 
 ```bash
 make init-config
@@ -897,7 +1065,7 @@ When any TLS path is populated, the gateway initializes its TLS client from thos
 
 ## Validation
 
-Validation includes:
+Application validation includes:
 
 - required, nonblank interlock names
 - required device addresses
@@ -909,11 +1077,13 @@ Validation includes:
 - required TLS file paths when an applicable tool uses HTTPS
 - valid defaults
 
-Invalid configuration is not written. Missing or unreadable configured TLS files also prevent the gateway from starting.
+SQLite constraints provide an additional persistence boundary for invalid ports, invalid booleans, invalid protocols, invalid switch IDs, duplicate listener ports, and invalid singleton settings.
+
+Invalid configuration is not committed. Missing or unreadable configured TLS files also prevent the gateway from starting.
 
 ## Configuration Ownership
 
-The gateway deep-clones configuration when it is accepted and whenever a snapshot is returned. The clone includes the `tools` backing array and the optional username/password string values. Callers therefore cannot mutate the gateway's internal configuration by editing a returned snapshot or by retaining references to a configuration supplied to `New` or `UpdateConfig`.
+The gateway deep-clones configuration when it is accepted and whenever a snapshot is returned. The clone includes the `tools` backing array and the optional username/password string values. Callers therefore cannot mutate the gateway's internal configuration by editing a returned snapshot or by retaining references to a configuration supplied to the gateway.
 
 # Development and Validation
 
@@ -950,7 +1120,7 @@ make verify
 2. `go.mod` and `go.sum` consistency checks
 3. `go vet ./...`
 4. `go tool staticcheck ./...`
-5. all Go tests under the race detector, including Admin/FBS preemption, incremental fleet refresh, independent configuration-copy, shared-status, Digest, TLS, retry/recovery, and signed-update authorization tests
+5. all Go tests under the race detector, including SQLite configuration round trips/migration, strict FBS request-shape validation, Admin/FBS preemption, incremental fleet refresh, independent configuration-copy, shared-status, Digest, TLS, retry/recovery, and signed-update authorization tests
 6. Bash syntax checks for top-level helpers, TLS helpers, and Linux/macOS deployment scripts
 7. ShellCheck across `scripts/` and `services/` shell source/templates
 8. PowerShell parser validation for the Windows installer, updater, and uninstaller when `pwsh` is available
@@ -1105,6 +1275,9 @@ make macos-amd64-deployment-guides
 Generated deployment files are build artifacts. Edit source templates, Markdown guides, or Makefile variables instead of editing generated copies.
 
 # Deployment Build Output
+
+Deployment packages continue to contain `config.yaml` because it is the first-run seed/rollback source. `gateway.sqlite3` is **not** prebuilt into deployment packages; the installed gateway creates and initializes the authoritative database on first start at the platform-specific persistent path.
+
 
 ## Linux
 
@@ -1284,12 +1457,15 @@ Installed layout:
 └── update.sh                 # production mode
 
 /etc/fbs-interlock-gateway/
-├── config.yaml
+├── config.yaml               # first-run seed / generated rollback mirror
 ├── config.yaml.bak
 └── tls/
     ├── server-ca.crt
     ├── gateway-client.crt
     └── gateway-client.key
+
+/var/lib/fbs-interlock-gateway/
+└── gateway.sqlite3           # authoritative configuration
 
 /etc/systemd/system/
 ├── fbs-interlock-gateway.service
@@ -1301,19 +1477,22 @@ The production Linux installer:
 
 - verifies or installs `lsof`, `curl`, `ca-certificates`, and `ufw`
 - configures UFW default-deny inbound behavior and the authorized FBS source/range rule
-- verifies all three packaged runtime TLS files
-- creates the service user and group when needed
-- installs the executable, service files, uninstaller, and updater
-- preserves an existing production config and installed TLS identity
-- sets installed TLS files to `root:<service-group>` with mode `0640`
-- verifies that the service account can read the config and TLS files
-- enables and starts the gateway and update timer
+- verifies all packaged runtime TLS files and validates the gateway binary
+- creates the service user/group and the writable `/var/lib/fbs-interlock-gateway` state directory
+- stops the existing service/update units before backing up replacement-sensitive state
+- backs up the installed application/service files and `gateway.sqlite3` for installation rollback
+- preserves the existing YAML rollback source/mirror and installed TLS identity
+- installs a systemd service that passes both `-config` and the authoritative `/var/lib/.../gateway.sqlite3` `-db` path
+- verifies that the service account can read the YAML/TLS files and can create state files in the database directory
+- starts the gateway, waits for the Admin API, and requires a non-empty service-account-readable/writable SQLite database
+- enables the hourly update timer only after the production gateway has passed health/database validation
+- restores the previous application, database, units, and service state when installation validation fails
 
-The development Linux installer applies the same dependency, firewall, binary, config, TLS, and service setup, but disables and removes managed updater units so a local build is not replaced.
+The development Linux installer is a thin wrapper around the same installer with `--development`. It applies the same dependency, firewall, binary, SQLite, YAML, TLS, and service setup while disabling/removing managed updater units so a local build is not replaced.
 
-The systemd service runs from `/etc/fbs-interlock-gateway`, writes to journald, restarts after exits with bounded rapid-restart behavior, and applies `NoNewPrivileges=true`.
+The systemd service runs from `/etc/fbs-interlock-gateway`, uses `StateDirectory=fbs-interlock-gateway` for mutable SQLite state under `/var/lib`, writes to journald, restarts after exits with bounded rapid-restart behavior, and applies `NoNewPrivileges=true`.
 
-The installed uninstaller removes the executable, updater, systemd units, and gateway-specific UFW rule. Standard uninstall preserves `/etc/fbs-interlock-gateway/config.yaml`, the installed `tls/` directory, and the service account. `--purge` removes the complete configuration directory while still preserving the service account and normal journal history.
+The standard uninstaller removes the executable, updater, systemd units, and gateway-specific UFW rule while preserving `/var/lib/fbs-interlock-gateway/gateway.sqlite3`, `/etc/fbs-interlock-gateway/config.yaml`, the installed `tls/` directory, and the service account. `--purge` removes both the configuration and state directories while still preserving the service account and normal journal history.
 
 ## Windows Templates
 
@@ -1334,10 +1513,12 @@ Installed layout:
 ```text
 C:\FBS\fbs-interlock-gateway\
 ├── fbs-interlock-gateway.exe
-├── config.yaml
+├── gateway.sqlite3           # authoritative configuration
+├── config.yaml               # first-run seed / generated rollback mirror
+├── config.yaml.bak
 ├── start.bat
-├── update.bat              # production mode only
-├── update.ps1              # production mode only
+├── update.bat                # production mode only
+├── update.ps1                # production mode only
 ├── tls\
 │   ├── server-ca.crt
 │   ├── gateway-client.crt
@@ -1351,20 +1532,22 @@ C:\FBS\fbs-interlock-gateway\
 
 The Windows installer:
 
-- elevates through User Account Control and validates a runnable amd64 PE binary
-- backs up existing executable files and Task Scheduler definitions for rollback
-- preserves an existing production config and installed TLS identity
+- elevates through User Account Control and validates a runnable AMD64 PE binary
+- backs up existing executable files, Task Scheduler definitions, and `gateway.sqlite3` for rollback
+- preserves the existing YAML rollback source/mirror and installed TLS identity
 - applies restricted NTFS access to Administrators, `SYSTEM`, and the runtime account
+- gives `NT AUTHORITY\LOCAL SERVICE` the modification rights required for SQLite and atomic compatibility-mirror replacement while keeping TLS private material restricted
 - runs the gateway task as `NT AUTHORITY\LOCAL SERVICE`
 - runs the production update task as `SYSTEM`
-- uses `start.bat` as a two-second restart supervisor with bounded rapid-restart behavior
+- uses `start.bat` as a two-second restart supervisor and passes explicit `-config` and `-db` paths
 - sets default inbound firewall behavior to block and installs a source-, port-, and executable-restricted allow rule
-- starts the gateway and validates the Admin API
+- starts the gateway, validates the Admin API, and requires a non-empty SQLite database
+- restores the previous database/files/task definitions when installation validation fails
 - installs the hourly updater only in production mode
 
-Development installation removes the managed update task and scripts while preserving the normal gateway task, config, TLS files, permissions, and firewall controls.
+Development installation removes the managed update task and scripts while preserving the normal gateway task, SQLite configuration, YAML rollback mirror, TLS files, permissions, and firewall controls.
 
-The standard uninstaller removes tasks, running processes, application and updater files, executable backups, and gateway firewall rules while preserving `config.yaml`, the installed `tls\` directory, and `logs\`. Purge mode also removes the preserved configuration, TLS files, and logs.
+The standard uninstaller removes tasks, running processes, application/updater files, executable backups, and gateway firewall rules while preserving `gateway.sqlite3`, `config.yaml`, the installed `tls\` directory, and `logs\`. Purge mode removes the preserved SQLite configuration, YAML configuration, TLS files, and logs.
 
 ## macOS Templates
 
@@ -1389,7 +1572,9 @@ Installed layout:
 └── update.sh                 # production mode only
 
 /Library/Application Support/fbs-interlock-gateway/
-├── config.yaml
+├── gateway.sqlite3           # authoritative configuration
+├── config.yaml               # first-run seed / generated rollback mirror
+├── config.yaml.bak
 └── tls/
     ├── server-ca.crt
     ├── gateway-client.crt
@@ -1410,19 +1595,23 @@ Installed layout:
 The macOS installer:
 
 - validates the operating system, current architecture, packaged Mach-O executable, scripts, property lists, Packet Filter anchor, and TLS files before replacement
-- creates the hidden non-login `_fbs-gateway` account and group when needed
-- preserves the active production config and installed TLS identity
-- installs config and TLS files with service-account-readable ownership and mode `0640`
+- creates the hidden non-login `_fbs-gateway` account/group when needed
+- stops the existing LaunchDaemons before backing up mutable SQLite state
+- backs up `gateway.sqlite3` together with the executable, wrappers, plists, and Packet Filter state for installation rollback
+- preserves the existing YAML rollback source/mirror and installed TLS identity
+- verifies that `_fbs-gateway` can create/remove files in the Application Support directory
+- installs a startup wrapper that passes explicit `-config` and `-db` paths
+- enables the gateway LaunchDaemon before bootstrapping it, then starts it
+- waits for the Admin API and requires a non-empty database that `_fbs-gateway` can read and write
 - installs the main LaunchDaemon and the hourly update LaunchDaemon in production mode
 - registers the executable with the Application Firewall
 - installs and validates a managed `pf` anchor and managed block in `/etc/pf.conf`
 - creates separate gateway and updater stdout/stderr logs
-- performs Admin API health validation
-- rolls back the executable, wrappers, plists, Packet Filter files, and prior service state when installation fails after replacement
+- rolls back the executable, wrappers, plists, database, Packet Filter files, and prior service state when installation validation fails
 
-Development installation preserves all production security controls but removes and disables the updater and update LaunchDaemon.
+Development installation preserves all production runtime security controls but removes/disables the updater and update LaunchDaemon.
 
-Standard uninstall removes executables, LaunchDaemons, updater, Packet Filter anchor and managed `pf.conf` block while preserving configuration, TLS data, logs, and the service account. Purge mode removes persistent configuration and logs as documented in the macOS deployment guide.
+Standard uninstall removes executables, LaunchDaemons, updater, Packet Filter anchor, and the managed `pf.conf` block while preserving `gateway.sqlite3`, the YAML rollback/compatibility files, TLS data, logs, and the service account. Purge mode removes persistent configuration/database state and logs as documented in the macOS deployment guide.
 
 Detailed procedures are maintained in:
 
@@ -1436,7 +1625,7 @@ Deployment packages contain rendered PDF copies of the matching guides.
 
 # Automatic Updates and Log Maintenance
 
-Production installers enable managed hourly release checks. Development installers keep the locally built gateway and disable managed release replacement. All production updaters modify only the application executable and, where applicable, gateway log archives; they do not replace `config.yaml` or installed TLS files.
+Production installers enable managed hourly release checks. Development installers keep the locally built gateway and disable managed release replacement. The updater never intentionally replaces the authoritative configuration with release content: release assets contain the application executable, while persistent SQLite/YAML/TLS state remains host-local.
 
 The update protocol is deliberately lightweight. Every normal hourly check downloads only the architecture-specific `.sha256` file and its **64-byte Ed25519 detached signature**. The multi-megabyte executable is downloaded only when the authenticated SHA differs from the installed executable.
 
@@ -1478,7 +1667,7 @@ Equal semantic versions are permitted when their bytes differ, allowing an authe
 
 ## Linux
 
-The generated systemd timer runs after boot and then periodically.
+The generated systemd timer runs after boot and then hourly.
 
 The Linux updater:
 
@@ -1490,10 +1679,10 @@ The Linux updater:
 6. downloads the candidate binary only when the authenticated SHA differs
 7. verifies the candidate SHA against the authenticated checksum
 8. reads current and candidate `-version` metadata and rejects stable-SemVer downgrades
-9. backs up the installed executable
+9. stops the gateway and backs up both the installed executable and the authoritative `gateway.sqlite3` when present
 10. installs and re-hashes the final executable
-11. restarts the service only when required
-12. rolls back when the installed checksum is wrong or the service fails to start
+11. restarts the service, waits for the Admin API, and requires a non-empty SQLite database
+12. restores the previous executable and database when installation or post-update health/database validation fails
 
 Inspect or disable the timer:
 
@@ -1523,10 +1712,10 @@ Each run:
 6. skips the executable download when the SHA already matches
 7. verifies the candidate SHA, Windows PE format, and AMD64 machine type
 8. reads current and candidate version metadata and rejects authenticated downgrades
-9. preserves the existing executable ACL, creates a timestamped backup, and stages the replacement
-10. verifies the staged and final installed executable hashes
-11. restarts the gateway task and waits for the Admin API health check
-12. restores the previous executable and ACL when installation or health validation fails
+9. preserves the existing executable ACL, creates a timestamped executable backup, and backs up `gateway.sqlite3` plus its ACL when the database exists
+10. stages the replacement and verifies the staged/final executable hashes
+11. restarts the gateway task and waits for the Admin API and database health checks
+12. restores the previous executable/ACL and SQLite database/ACL when post-update validation fails
 13. rotates `gateway.log` and `gateway-error.log` when either reaches 10 MiB
 
 Windows retains up to 30 numbered ZIP archives per gateway log.
@@ -1551,11 +1740,13 @@ Each run:
 6. hashes the installed binary and skips the candidate download when it already matches and no log maintenance is required
 7. verifies the candidate SHA and Mach-O architecture
 8. reads current and candidate version metadata and rejects authenticated downgrades
-9. creates a timestamped backup and stages the replacement
+9. creates a timestamped executable backup and stages the replacement
 10. verifies the staged and final installed binary hashes
 11. restarts the gateway only when needed and waits for the Admin API health check
 12. restores the previous binary when installation or health validation fails
 13. rotates `gateway.log` and `gateway-error.log` when either reaches 10 MiB
+
+The macOS updater does not intentionally replace `gateway.sqlite3`, `config.yaml`, or TLS identity files. The macOS installer separately includes `gateway.sqlite3` in its installation rollback snapshot.
 
 macOS retains up to 30 numbered gzip archives per gateway log.
 
@@ -1772,14 +1963,18 @@ Equivalent command:
 
 ```bash
 go run ./cmd/fbs-interlock-gateway \
-  -config ./config.yaml
+  -config ./config.yaml \
+  -db ./gateway.sqlite3
 ```
+
+On the first run, an uninitialized `gateway.sqlite3` imports the YAML. After that, SQLite is authoritative; editing `config.yaml` alone does not change the running configuration. Remove the local test database only when you intentionally want to exercise first-run migration again.
 
 Run with an explicit Admin address:
 
 ```bash
 go run ./cmd/fbs-interlock-gateway \
   -config ./config.yaml \
+  -db ./gateway.sqlite3 \
   -admin 127.0.0.1:18090
 ```
 
@@ -1809,6 +2004,12 @@ Read configuration:
 curl -s "http://127.0.0.1:18090/api/config"
 ```
 
+Export the authoritative local test database:
+
+```bash
+go run ./cmd/fbs-interlock-gateway config export   -db ./gateway.sqlite3   -output ./config-export.yaml
+```
+
 Test an HTTP Shelly directly:
 
 ```bash
@@ -1836,7 +2037,7 @@ curl \
 
 Add `--anyauth -u "admin:<password>"` when the HTTPS Shelly also requires Digest Authentication.
 
-Test through the gateway:
+Test accepted FBS requests through the gateway:
 
 ```bash
 curl "http://<gateway-host>:<port>/status"
@@ -1844,28 +2045,45 @@ curl "http://<gateway-host>:<port>/on"
 curl "http://<gateway-host>:<port>/off"
 ```
 
+The FBS-facing parser is deliberately exact. Useful negative checks are:
+
+```bash
+# Query strings are rejected with 400.
+curl -i "http://<gateway-host>:<port>/on?state=1"
+
+# Unsupported methods are rejected with 405.
+curl -i -X POST "http://<gateway-host>:<port>/on"
+
+# Non-exact paths are rejected with 404.
+curl -i "http://<gateway-host>:<port>/ON"
+```
+
 # Runtime Behavior
 
 On startup, the gateway:
 
-1. parses `-config`, `-admin`, and `-version`
-2. resolves and loads configuration from the explicit path or beside the executable
-3. resolves relative TLS file paths against the configuration directory
-4. applies defaults and deep-clones the accepted configuration
-5. initializes the shared status store with safe-output placeholders
-6. loads the configured Shelly server CA and gateway client identity when TLS is configured
-7. validates enabled tools, protocols, listener ports, and required TLS fields
-8. starts the Admin server unless disabled
-9. starts one FBS-facing HTTP listener per enabled tool
-10. maps each gateway port to one configured interlock
-11. logs inbound FBS requests and outbound responses
-12. uses HTTP or HTTPS, optional mutual TLS, and optional Digest Authentication per tool
-13. records every completed Shelly result in the shared Admin status store
-14. reports the configured safe state and records the error when a device request fails
-15. shuts down cleanly on interrupt, termination, Admin restart request, or server error
+1. parses `-db`, `-config`, `-admin`, and `-version`
+2. resolves the SQLite path from explicit `-db`, then `FBS_GATEWAY_DB_PATH`, then `gateway.sqlite3` beside the YAML path
+3. opens/configures SQLite, applies supported schema migrations, and performs `PRAGMA quick_check(1)`
+4. loads configuration from SQLite when initialized; otherwise loads, normalizes, defaults, validates, and transactionally imports the legacy YAML source
+5. reloads the accepted configuration from SQLite and treats the database as authoritative thereafter
+6. deep-clones the accepted runtime configuration
+7. initializes the shared status store with safe-output placeholders
+8. loads the configured Shelly server CA and gateway client identity when TLS is configured
+9. validates enabled tools, protocols, listener ports, and required TLS fields
+10. starts the Admin server unless disabled
+11. starts one FBS-facing HTTP listener per enabled tool
+12. maps each gateway port to one configured interlock
+13. logs inbound FBS requests and outbound responses
+14. uses HTTP or HTTPS, optional mutual TLS, and optional Digest Authentication per tool
+15. records every completed Shelly result in the shared Admin status store
+16. reports the configured safe state and records the error when a device request fails
+17. shuts down cleanly on interrupt, termination, Admin restart request, or server error
 
 During operation:
 
+- FBS-facing requests are accepted only as exact `GET /status`, `GET /on`, or `GET /off` requests with no query string; rejected requests never reach the Shelly client or shared status store
+- ordinary accepted FBS/Shelly requests use the in-memory configuration; SQLite is not queried on every request
 - ordinary Admin status polling reads memory only
 - an explicit Admin refresh queries enabled tools with up to 32 workers
 - refresh results are published independently as each device completes
@@ -1888,7 +2106,9 @@ Before starting an enabled listener, the gateway may clear a process already usi
 
 ## Configuration Reload Behavior
 
-A successful Admin UI save writes the updated configuration and requests a process restart. The installed platform supervisor rebuilds runtime listeners, the shared status store, the Shelly transport, TLS trust, Digest state, and per-device scheduling state by starting the process again.
+A successful Admin UI save validates the complete configuration and commits it through the configured persistence store. Production runtime uses the SQLite store, so the authoritative database is replaced transactionally and the generated YAML compatibility mirror is refreshed afterward. The Admin save then requests a process restart.
+
+The installed platform supervisor rebuilds runtime listeners, the shared status store, the Shelly transport, TLS trust, Digest state, and per-device scheduling state by starting the process again. Manual `config import` also updates the authoritative database transactionally, but the operator must restart the supervised gateway afterward.
 
 # Logging
 
@@ -1920,7 +2140,7 @@ phase=response_headers
 phase=response_body
 ```
 
-They also report whether the HTTP connection was reused and whether the TLS session resumed. FBS status and set failures are logged before the configured safe state is returned.
+They also report whether the HTTP connection was reused and whether the TLS session resumed. FBS status and set failures are logged before the configured safe state is returned. Invalid FBS request shapes are logged as rejected method, query, or path events and return the corresponding HTTP error without changing relay or shared-status state.
 
 Platform logs:
 
@@ -1954,7 +2174,7 @@ The Windows and macOS production updaters rotate `gateway.log` and `gateway-erro
 
 # Repository Safety
 
-Ignored local artifacts:
+Ignored local artifacts currently include:
 
 ```gitignore
 .DS_Store
@@ -1962,14 +2182,18 @@ build
 pki
 config.yaml
 config.yaml.bak
-*.patch
+*.db-journal
+*.db-wal
+*.db-shm
 ```
 
-`pki/` contains private CA material, gateway certificate requests/identity material, and per-device Shelly keys. `build/` contains generated binaries, deployment scripts, service definitions, copied runtime TLS material, generated update files, and deployment-guide PDFs. Patch files are ignored so local review or transfer patches are not committed accidentally.
+`pki/` contains private CA material, gateway certificate requests/identity material, and per-device Shelly keys. `build/` contains generated binaries, deployment scripts, service definitions, copied runtime TLS material, generated update files, and deployment-guide PDFs.
+
+`gateway.sqlite3` is authoritative production configuration and can contain Shelly credentials. Production databases, non-redacted configuration exports, generated compatibility YAML containing credentials, and SQLite sidecar files must not be committed to source control.
 
 There is no repository-root generated `tls/` staging directory. Platform deployment builds copy the required runtime trust/identity files directly from `pki/ca/` and `pki/gateway/` into their generated `build/.../tls/` directories.
 
-Committed security material is limited to non-secret trust/configuration source such as certificate templates and `internal/updateauth/update-signing-public.pem`. The Ed25519 update-signing **private** key, GPG private key, CA private keys, production configuration, active credentials, generated certificates/CSRs, and production mappings must remain outside version control.
+Committed security material is limited to non-secret trust/configuration source such as certificate templates and `internal/updateauth/update-signing-public.pem`. The Ed25519 update-signing **private** key, GPG private key, CA private keys, production configuration/database state, active credentials, generated certificates/CSRs, and production mappings must remain outside version control.
 
 `SECURITY.md` directs vulnerability reports to GitHub Private Vulnerability Reporting and defines operational-safety restrictions for testing against a system that can affect physical interlocks.
 

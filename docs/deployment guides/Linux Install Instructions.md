@@ -2,7 +2,7 @@
 title: "FBS Interlock Gateway"
 subtitle: "Linux Installation and Operations Guide"
 author: "William Veith"
-date: "2026-08-06"
+date: "2026-09-04"
 lang: en-US
 ---
 
@@ -112,7 +112,7 @@ Before building or installing, confirm the following:
 
 - The repository is on the intended commit or release.
 - `make verify` completes successfully.
-- `config.yaml` contains the intended non-production or production configuration.
+- The packaged `config.yaml` contains the intended seed configuration for a fresh installation or legacy rollback. After first startup, `gateway.sqlite3` becomes authoritative.
 - `make ca` and `make gateway-cert` have populated the required certificate material under `pki/ca/` and `pki/gateway/`.
 - The build target matches the gateway CPU architecture.
 - The configured FBS listener ports do not conflict with other services.
@@ -365,7 +365,7 @@ Production mode:
 - Installs `update.sh`
 - Installs and enables the systemd update service and timer
 - Performs checksum-aware updates from GitHub Releases
-- Preserves an existing production configuration and installed TLS identity
+- Preserves the authoritative SQLite configuration, YAML rollback/compatibility state, and installed TLS identity
 - Restores managed updates after a previous development installation
 
 ## Development installation
@@ -379,7 +379,7 @@ sudo ./install-dev.sh
 Development mode:
 
 - Installs the local gateway executable and all normal security controls
-- Preserves the production configuration and installed TLS files
+- Preserves the authoritative SQLite configuration, YAML rollback/compatibility state, and installed TLS files
 - Stops and disables the managed update timer and service
 - Removes installed updater units and the updater script
 - Prevents the local development executable from being replaced by a published release
@@ -423,7 +423,7 @@ Enter the administrator password when prompted.
 
 > **Reinstallation behavior**
 >
-> Reinstallation preserves the active production `config.yaml` and installed TLS files. The installer corrects their ownership and modes but does not replace their contents.
+> Reinstallation preserves the authoritative `gateway.sqlite3` database, the YAML rollback mirror, and installed TLS files. The installer corrects ownership and modes without replacing persistent configuration.
 
 # What the Installer Does
 
@@ -432,16 +432,20 @@ The installer performs the following operations.
 ## Preflight and dependencies
 
 - Requires root privileges and elevates through `pkexec` or `sudo` when available
-- Verifies the packaged executable, configuration, service file, uninstaller, and runtime TLS files
+- Verifies the packaged executable, seed configuration, service file, uninstaller, and runtime TLS files
 - Requires production updater files when production mode is selected
 - Verifies or installs `lsof`, `curl`, `ca-certificates`, and `ufw`
+- Records whether the existing gateway and update timer are enabled and active
 - Stops existing gateway and updater units before replacement
 - Checks the configured gateway listener range for conflicting processes
+- Backs up the current application directory, systemd units, and `gateway.sqlite3` when present so a failed installation can be rolled back
 
-## Service account
+## Service account and persistent state
 
 - Creates the configured gateway service user and group when needed
 - Uses the service identity for the long-running gateway process
+- Creates `/var/lib/fbs-interlock-gateway/` with mode `0750` for mutable SQLite state
+- Verifies that the service account can create and remove files in the state directory
 - Preserves the service user and group during uninstall for safe reinstallation
 
 ## Application and configuration
@@ -450,8 +454,14 @@ The installer performs the following operations.
 - Installs `uninstall.sh` under the application directory
 - Installs `update.sh` in production mode
 - Creates `/etc/fbs-interlock-gateway/`
-- Installs a new `config.yaml` only when an active configuration does not already exist
-- Preserves `config.yaml.bak` files created by atomic Admin UI configuration writes
+- Installs a new `config.yaml` only when no rollback/seed YAML already exists
+- Starts the gateway with:
+  - `-config /etc/fbs-interlock-gateway/config.yaml`
+  - `-db /var/lib/fbs-interlock-gateway/gateway.sqlite3`
+- On the first successful start, imports the legacy YAML into SQLite when the database is uninitialized
+- Leaves the original human-authored YAML untouched during that first import
+- Treats `gateway.sqlite3` as authoritative after initialization
+- After later Admin saves or CLI imports that maintain the mirror, writes a generated compatibility `config.yaml` and preserves the previous YAML as `config.yaml.bak`
 
 ## Gateway TLS files
 
@@ -459,17 +469,21 @@ The installer performs the following operations.
 - Installs missing runtime TLS files from the deployment package
 - Preserves existing installed TLS files during reinstallation
 - Sets installed TLS files to `root:<service-group>` with mode `0640`
-- Verifies that the gateway service account can read the configuration and each TLS file
+- Verifies that the gateway service account can read the YAML rollback mirror and each TLS file
 
 ## systemd services
 
 - Installs and enables `fbs-interlock-gateway.service`
-- Runs the gateway with `/etc/fbs-interlock-gateway` as its working directory
+- Uses `/etc/fbs-interlock-gateway` as the working directory
+- Uses systemd `StateDirectory=fbs-interlock-gateway` for persistent mutable state
 - Writes standard output and standard error to journald
 - Restarts the gateway after process exits with bounded rapid-restart behavior
 - Applies `NoNewPrivileges=true`
-- Installs and enables the update service and timer only in production mode
+- Installs and enables the update service and hourly timer only in production mode
 - Starts or restarts the gateway after installation
+- Waits for the Admin API to respond before declaring installation successful
+- Verifies that `gateway.sqlite3` exists, is non-empty, and is readable and writable by the service account
+- Restores the previous application, systemd state, and database if post-install validation fails
 
 ## Firewall controls
 
@@ -490,17 +504,28 @@ The installer performs the following operations.
 └── update.sh                 # production mode only
 ```
 
-## Configuration and TLS
+## Authoritative configuration state
+
+```text
+/var/lib/fbs-interlock-gateway/
+└── gateway.sqlite3           # authoritative SQLite configuration
+```
+
+The directory is persistent systemd state and is created with mode `0750`. The gateway database is local host state and should not be placed on NFS, SMB, or another network filesystem.
+
+## YAML rollback mirror and TLS
 
 ```text
 /etc/fbs-interlock-gateway/
-├── config.yaml
-├── config.yaml.bak           # present after an atomic replacement
+├── config.yaml               # first-run seed; later generated rollback mirror
+├── config.yaml.bak           # previous YAML mirror when available
 └── tls/
     ├── server-ca.crt
     ├── gateway-client.crt
     └── gateway-client.key
 ```
+
+After `gateway.sqlite3` is initialized, manual changes to `config.yaml` are ignored by normal gateway startup. Use the Admin UI or the documented export/import workflow to change the authoritative configuration.
 
 ## systemd units
 
@@ -635,18 +660,31 @@ sudo ss -ltnp |
   grep -E ':(18090|8081)\b'
 ```
 
-## Verify configuration and TLS permissions
+## Verify configuration database, rollback mirror, and TLS permissions
 
-Confirm the service account can read the active configuration:
+Confirm the authoritative database exists and is non-empty:
+
+```bash
+sudo test -s \
+  /var/lib/fbs-interlock-gateway/gateway.sqlite3
+```
+
+Confirm the service account can read and write it:
+
+```bash
+sudo -u fbs-gateway test -r \
+  /var/lib/fbs-interlock-gateway/gateway.sqlite3
+
+sudo -u fbs-gateway test -w \
+  /var/lib/fbs-interlock-gateway/gateway.sqlite3
+```
+
+Confirm the service account can read the YAML rollback mirror and runtime TLS files:
 
 ```bash
 sudo -u fbs-gateway test -r \
   /etc/fbs-interlock-gateway/config.yaml
-```
 
-Confirm the service account can read all runtime TLS files:
-
-```bash
 sudo -u fbs-gateway test -r \
   /etc/fbs-interlock-gateway/tls/server-ca.crt
 
@@ -662,7 +700,11 @@ Each command should exit silently with status `0`.
 Inspect ownership and modes:
 
 ```bash
+sudo ls -ld \
+  /var/lib/fbs-interlock-gateway
+
 sudo ls -l \
+  /var/lib/fbs-interlock-gateway/gateway.sqlite3 \
   /etc/fbs-interlock-gateway/config.yaml \
   /etc/fbs-interlock-gateway/tls/
 ```
@@ -816,29 +858,35 @@ which executes:
 /opt/fbs-interlock-gateway/update.sh
 ```
 
+The timer is an hourly release check.
+
 ## Update behavior
 
 The updater:
 
-1. Acquires the update execution context through systemd.
+1. Runs through the systemd update service.
 2. Selects the release asset matching the installed Linux architecture.
-3. Downloads the published SHA-256 checksum first.
-4. Validates that the checksum contains a usable SHA-256 value.
+3. Downloads the matching `.sha256` file and its detached `.sha256.sig`.
+4. Uses the currently installed gateway binary to authenticate the signed checksum and asset name.
 5. Calculates the checksum of the installed executable.
 6. Exits without downloading or restarting when the installed executable already matches.
-7. Downloads the binary only when it differs or is missing.
-8. Verifies the downloaded binary against the published checksum.
-9. Backs up the installed executable.
-10. Installs and verifies the replacement.
-11. Restarts the gateway only when required.
-12. Restores the previous executable when the installed checksum is wrong or the service fails to start.
+7. Downloads the candidate binary only when the authenticated checksum differs.
+8. Verifies the candidate SHA-256 and version metadata and rejects authenticated downgrades.
+9. Stops the gateway before replacing a required binary.
+10. Backs up the installed executable and, when present, the authoritative `/var/lib/fbs-interlock-gateway/gateway.sqlite3`.
+11. Installs and re-verifies the replacement executable.
+12. Restarts the gateway and waits for the Admin API.
+13. Verifies that the SQLite database still exists and is non-empty.
+14. Restores both the previous executable and previous SQLite database when replacement, startup, Admin health validation, or database validation fails.
 
-The updater changes only the application executable. It does not replace:
+The updater does not intentionally replace the YAML rollback mirror or installed TLS files:
 
-- `config.yaml`
+- `/etc/fbs-interlock-gateway/config.yaml`
 - `server-ca.crt`
 - `gateway-client.crt`
 - `gateway-client.key`
+
+A new binary can open or migrate the authoritative database during startup. The update-time database backup exists so a failed binary update can restore the configuration state that accompanied the previous executable.
 
 Linux log retention remains controlled by journald; the updater does not rotate separate gateway log files.
 
@@ -967,11 +1015,19 @@ Existing log history remains subject to the host's journald retention settings.
 
 # Edit the Configuration
 
-The active configuration is:
+The authoritative configuration is:
+
+```text
+/var/lib/fbs-interlock-gateway/gateway.sqlite3
+```
+
+The compatibility/rollback YAML is:
 
 ```text
 /etc/fbs-interlock-gateway/config.yaml
 ```
+
+`config.yaml` is used as the import source only when the SQLite database is uninitialized. Once `gateway.sqlite3` contains configuration, normal startup loads SQLite and ignores manual edits to the YAML file.
 
 ## Preferred method: Admin UI
 
@@ -981,42 +1037,57 @@ Open:
 http://127.0.0.1:18090
 ```
 
-The Admin UI validates fields, preserves stored passwords unless explicitly replaced or cleared, writes the configuration atomically, creates `config.yaml.bak` when possible, and requests a clean gateway restart.
+The Admin UI validates the complete proposed configuration, preserves stored passwords unless explicitly replaced or cleared, commits the change transactionally to SQLite, writes a generated YAML compatibility mirror when possible, moves the prior YAML to `config.yaml.bak`, and requests a clean gateway restart.
 
-## Manual method
+## Manual method: export, edit, and import
+
+Export the authoritative database to a temporary YAML file:
 
 ```bash
-sudo nano \
-  /etc/fbs-interlock-gateway/config.yaml
+sudo /opt/fbs-interlock-gateway/fbs-interlock-gateway \
+  config export \
+  -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 \
+  -output /tmp/fbs-interlock-gateway.yaml
 ```
 
-Recommended TLS paths are relative to the configuration directory:
+Edit the exported file:
 
-```yaml
-bind: "0.0.0.0"
-
-defaults:
-  timeout_ms: 3000
-  safe_state_on_error: "off"
-  shelly_tls:
-    server_ca_file: "./tls/server-ca.crt"
-    client_cert_file: "./tls/gateway-client.crt"
-    client_key_file: "./tls/gateway-client.key"
-
-tools:
-  - interlock_name: "EQU-EXAMPLE-TOOL-01"
-    ip: "2c41389b0d77.dynamic.utexas.edu"
-    protocol: "https"
-    port: 8081
-    switch_id: 0
-    username: "admin"
-    password: "example-password"
-    enabled: true
+```bash
+sudo nano /tmp/fbs-interlock-gateway.yaml
 ```
 
-The systemd service uses the configuration directory as its working directory. The gateway also resolves relative TLS paths against the directory containing the loaded configuration.
+Import the complete edited configuration transactionally and refresh the YAML rollback mirror:
 
-Restart the gateway after manually editing the configuration.
+```bash
+sudo /opt/fbs-interlock-gateway/fbs-interlock-gateway \
+  config import \
+  -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 \
+  -input /tmp/fbs-interlock-gateway.yaml \
+  -mirror-config /etc/fbs-interlock-gateway/config.yaml
+```
+
+Restart the gateway after a successful CLI import:
+
+```bash
+sudo systemctl restart \
+  fbs-interlock-gateway.service
+```
+
+For review or sharing, create a redacted export:
+
+```bash
+sudo /opt/fbs-interlock-gateway/fbs-interlock-gateway \
+  config export \
+  -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 \
+  -output /tmp/fbs-interlock-gateway-redacted.yaml \
+  -redact-secrets
+```
+
+Do not import a redacted export as production configuration; stored passwords are replaced with the literal value `REDACTED`.
+
+> **Do not edit `config.yaml` as the normal configuration workflow**
+>
+> After SQLite initialization, direct YAML edits do not change the running configuration. Use the Admin UI or `config export` / `config import`.
 
 > **Configuration rule**
 >
@@ -1202,15 +1273,21 @@ sudo lsof \
   -sTCP:LISTEN
 ```
 
-Check the exact tool entry in `config.yaml` and confirm the tool is enabled.
+Check the authoritative configuration through the Admin UI or export `gateway.sqlite3` and confirm the tool is enabled.
 
 Review logs for hostname resolution, authentication, timeout, TLS, or certificate errors.
 
-## The gateway cannot read the configuration or TLS files
+## The gateway cannot read the database, rollback mirror, or TLS files
 
 Test access as the service account:
 
 ```bash
+sudo -u fbs-gateway test -r \
+  /var/lib/fbs-interlock-gateway/gateway.sqlite3
+
+sudo -u fbs-gateway test -w \
+  /var/lib/fbs-interlock-gateway/gateway.sqlite3
+
 sudo -u fbs-gateway test -r \
   /etc/fbs-interlock-gateway/config.yaml
 
@@ -1225,7 +1302,7 @@ sudo namei -l \
   /etc/fbs-interlock-gateway/tls/gateway-client.key
 ```
 
-Re-run the selected installer to restore intended ownership and permissions without replacing the active configuration or installed TLS identity.
+Re-run the selected installer to restore intended state-directory access, ownership, and permissions without replacing the authoritative database or installed TLS identity.
 
 ## The UFW rule is missing or incorrect
 
@@ -1380,15 +1457,18 @@ sudo /opt/fbs-interlock-gateway/uninstall.sh
 The standard uninstall preserves:
 
 ```text
+/var/lib/fbs-interlock-gateway/gateway.sqlite3
 /etc/fbs-interlock-gateway/config.yaml
 /etc/fbs-interlock-gateway/tls/
 ```
 
-It also preserves the configured gateway service user and group so a later installation can reuse stable ownership.
+The SQLite database remains the authoritative configuration. The YAML file remains the first-run/rollback compatibility copy.
+
+The uninstaller also preserves the configured gateway service user and group so a later installation can reuse stable ownership.
 
 Existing journald entries remain subject to the host's normal journal retention policy.
 
-## Purge persistent configuration and TLS
+## Purge persistent configuration, SQLite state, and TLS
 
 Run:
 
@@ -1401,9 +1481,10 @@ Purge mode also removes:
 
 ```text
 /etc/fbs-interlock-gateway/
+/var/lib/fbs-interlock-gateway/
 ```
 
-The service user and group remain preserved.
+This deletes `gateway.sqlite3`, the YAML rollback mirror, and installed TLS material. The service user and group remain preserved.
 
 ## Use the deployment-copy uninstaller
 
@@ -1440,7 +1521,8 @@ sudo ./uninstall.sh \
 | Show UFW status | `sudo ufw status verbose` |
 | Follow gateway logs | `sudo journalctl -u fbs-interlock-gateway.service -f` |
 | View updater logs | `sudo journalctl -u fbs-interlock-gateway-update.service --no-pager` |
-| Edit config | `sudo nano /etc/fbs-interlock-gateway/config.yaml` |
+| Export authoritative config | `sudo /opt/fbs-interlock-gateway/fbs-interlock-gateway config export -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 -output /tmp/fbs-interlock-gateway.yaml` |
+| Import edited config | `sudo /opt/fbs-interlock-gateway/fbs-interlock-gateway config import -db /var/lib/fbs-interlock-gateway/gateway.sqlite3 -input /tmp/fbs-interlock-gateway.yaml -mirror-config /etc/fbs-interlock-gateway/config.yaml` |
 | Standard uninstall | `sudo /opt/fbs-interlock-gateway/uninstall.sh` |
 | Purge uninstall | `sudo /opt/fbs-interlock-gateway/uninstall.sh --purge` |
 

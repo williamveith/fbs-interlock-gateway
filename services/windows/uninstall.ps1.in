@@ -18,6 +18,7 @@ $FirewallRuleName = 'FBS Interlock Gateway - Authorized FBS Source'
 $InstallDirectory = [IO.Path]::GetFullPath('@WINDOWS_INSTALL_DIR@')
 $ConfigDirectory = [IO.Path]::GetFullPath('@WINDOWS_CONFIG_DIR@')
 $ConfigPath = [IO.Path]::GetFullPath('@WINDOWS_CONFIG_PATH@')
+$DatabasePath = [IO.Path]::GetFullPath('@WINDOWS_DB_PATH@')
 $TlsDirectory = [IO.Path]::GetFullPath('@WINDOWS_TLS_DIR@')
 $LogDirectory = [IO.Path]::GetFullPath('@WINDOWS_LOG_DIR@')
 
@@ -63,6 +64,7 @@ function Preserve-PersistentDataInsideInstallDirectory {
     try {
         $items = @(
             @{ Path = $ConfigPath; Name = 'config.yaml' },
+            @{ Path = $DatabasePath; Name = 'gateway.sqlite3' },
             @{ Path = $TlsDirectory; Name = 'tls' },
             @{ Path = $LogDirectory; Name = 'logs' }
         )
@@ -117,7 +119,7 @@ Remove-FirewallRuleIfPresent -Name $LegacyFirewallRuleName
 Remove-FirewallRuleIfPresent -Name $FirewallRuleName
 
 if ($Purge) {
-    Write-Host 'Purging application files, configuration, TLS files, and logs...'
+    Write-Host 'Purging application files, SQLite state, configuration, TLS files, and logs...'
 
     $pathsToRemove = @(
         $InstallDirectory,
@@ -156,7 +158,9 @@ if ($Purge) {
     Write-Host 'Persistent gateway data was removed.'
 }
 else {
-    Write-Host 'The production configuration was preserved at:'
+    Write-Host 'The authoritative SQLite configuration was preserved at:'
+    Write-Host "  $DatabasePath"
+    Write-Host 'The legacy YAML / rollback mirror was preserved at:'
     Write-Host "  $ConfigPath"
     Write-Host 'The gateway TLS files were preserved at:'
     Write-Host "  $TlsDirectory"

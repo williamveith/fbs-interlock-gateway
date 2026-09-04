@@ -12,7 +12,11 @@ User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
 # Relative paths in config.yaml, including ./tls/..., resolve from here.
 WorkingDirectory=@CONFIG_DIR@
-ExecStart=@INSTALL_DIR@/@APP@ -config @CONFIG_PATH@
+# Persistent mutable state belongs under /var/lib; systemd also creates and
+# maintains this directory for fresh installs and reboots.
+StateDirectory=@APP@
+StateDirectoryMode=0750
+ExecStart=@INSTALL_DIR@/@APP@ -config @CONFIG_PATH@ -db /var/lib/@APP@/gateway.sqlite3
 
 StandardOutput=journal
 StandardError=journal

@@ -3,6 +3,7 @@ package fbs
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -72,15 +73,15 @@ func TestStatusReturnsShellyOutputAndUpdatesSharedStatus(t *testing.T) {
 	server, sharedStatus := newTestServer(false, client)
 
 	req := httptest.NewRequest(
-		"GET",
+		http.MethodGet,
 		"http://gateway/status",
 		nil,
 	)
 	res := httptest.NewRecorder()
 	server.handleFBSRequest(res, req, testTool())
 
-	if res.Code != 200 {
-		t.Fatalf("status = %d, want 200", res.Code)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
 	}
 	if got := res.Body.String(); got != `{"Success":1,"State":1}` {
 		t.Fatalf("body = %q", got)
@@ -98,10 +99,16 @@ func TestOnAndOffCommandsUpdateSharedStatus(t *testing.T) {
 		want bool
 		body string
 	}{
-		{path: "/on", want: true, body: `{"Success":1,"State":1}`},
-		{path: "/off", want: false, body: `{"Success":1,"State":0}`},
-		{path: "/?state=1", want: true, body: `{"Success":1,"State":1}`},
-		{path: "/?state=0", want: false, body: `{"Success":1,"State":0}`},
+		{
+			path: "/on",
+			want: true,
+			body: `{"Success":1,"State":1}`,
+		},
+		{
+			path: "/off",
+			want: false,
+			body: `{"Success":1,"State":0}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -110,12 +117,20 @@ func TestOnAndOffCommandsUpdateSharedStatus(t *testing.T) {
 			server, sharedStatus := newTestServer(false, client)
 
 			req := httptest.NewRequest(
-				"GET",
+				http.MethodGet,
 				"http://gateway"+tt.path,
 				nil,
 			)
 			res := httptest.NewRecorder()
 			server.handleFBSRequest(res, req, testTool())
+
+			if res.Code != http.StatusOK {
+				t.Fatalf(
+					"status = %d, want %d",
+					res.Code,
+					http.StatusOK,
+				)
+			}
 
 			if len(client.setCalls) != 1 || client.setCalls[0] != tt.want {
 				t.Fatalf(
@@ -124,13 +139,173 @@ func TestOnAndOffCommandsUpdateSharedStatus(t *testing.T) {
 					tt.want,
 				)
 			}
+
 			if got := res.Body.String(); got != tt.body {
-				t.Fatalf("body = %q, want %q", got, tt.body)
+				t.Fatalf(
+					"body = %q, want %q",
+					got,
+					tt.body,
+				)
 			}
 
 			row := sharedStatus.Snapshot()[0]
 			if !row.Connected || row.Output != tt.want || row.Error != "" {
 				t.Fatalf("shared status = %#v", row)
+			}
+		})
+	}
+}
+
+func TestRequestsWithQueryStringsAreRejected(t *testing.T) {
+	tests := []string{
+		"/?state=1",
+		"/?state=0",
+		"/on?state=1",
+		"/off?state=0",
+		"/status?refresh=1",
+	}
+
+	for _, path := range tests {
+		t.Run(path, func(t *testing.T) {
+			client := &fakeShellyClient{}
+			server, sharedStatus := newTestServer(false, client)
+			before := sharedStatus.Snapshot()
+
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"http://gateway"+path,
+				nil,
+			)
+			res := httptest.NewRecorder()
+			server.handleFBSRequest(res, req, testTool())
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"status = %d, want %d",
+					res.Code,
+					http.StatusBadRequest,
+				)
+			}
+
+			if len(client.setCalls) != 0 {
+				t.Fatalf(
+					"rejected request caused Set calls: %v",
+					client.setCalls,
+				)
+			}
+
+			after := sharedStatus.Snapshot()
+			if len(after) != len(before) || after[0] != before[0] {
+				t.Fatalf(
+					"rejected request changed shared status: before=%#v after=%#v",
+					before,
+					after,
+				)
+			}
+		})
+	}
+}
+
+func TestNonGETRequestsAreRejected(t *testing.T) {
+	methods := []string{
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+	}
+
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			client := &fakeShellyClient{}
+			server, sharedStatus := newTestServer(false, client)
+			before := sharedStatus.Snapshot()
+
+			req := httptest.NewRequest(
+				method,
+				"http://gateway/on",
+				nil,
+			)
+			res := httptest.NewRecorder()
+			server.handleFBSRequest(res, req, testTool())
+
+			if res.Code != http.StatusMethodNotAllowed {
+				t.Fatalf(
+					"status = %d, want %d",
+					res.Code,
+					http.StatusMethodNotAllowed,
+				)
+			}
+
+			if len(client.setCalls) != 0 {
+				t.Fatalf(
+					"rejected method caused Set calls: %v",
+					client.setCalls,
+				)
+			}
+
+			after := sharedStatus.Snapshot()
+			if len(after) != len(before) || after[0] != before[0] {
+				t.Fatalf(
+					"rejected method changed shared status: before=%#v after=%#v",
+					before,
+					after,
+				)
+			}
+		})
+	}
+}
+
+func TestUnknownPathsAreRejectedWithoutChangingRelayOrStatus(t *testing.T) {
+	paths := []string{
+		"/not-a-command",
+		"/ON",
+		"/OFF",
+		"/STATUS",
+		"/on/",
+		"/off/",
+		"/status/",
+		"/something/on",
+		"/onwhatever",
+		"/statusblah",
+		"/",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			client := &fakeShellyClient{}
+			server, sharedStatus := newTestServer(false, client)
+			before := sharedStatus.Snapshot()
+
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"http://gateway"+path,
+				nil,
+			)
+			res := httptest.NewRecorder()
+			server.handleFBSRequest(res, req, testTool())
+
+			if res.Code != http.StatusNotFound {
+				t.Fatalf(
+					"status = %d, want %d",
+					res.Code,
+					http.StatusNotFound,
+				)
+			}
+
+			if len(client.setCalls) != 0 {
+				t.Fatalf(
+					"unknown path caused Set calls: %v",
+					client.setCalls,
+				)
+			}
+
+			after := sharedStatus.Snapshot()
+			if len(after) != len(before) || after[0] != before[0] {
+				t.Fatalf(
+					"unknown path changed shared status: before=%#v after=%#v",
+					before,
+					after,
+				)
 			}
 		})
 	}
@@ -145,12 +320,16 @@ func TestShellyStatusFailureReturnsAndRecordsConfiguredSafeState(
 	server, sharedStatus := newTestServer(true, client)
 
 	req := httptest.NewRequest(
-		"GET",
+		http.MethodGet,
 		"http://gateway/status",
 		nil,
 	)
 	res := httptest.NewRecorder()
 	server.handleFBSRequest(res, req, testTool())
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
 
 	if got := res.Body.String(); got != `{"Success":1,"State":1}` {
 		t.Fatalf("body = %q, want safe-on response", got)
@@ -171,12 +350,16 @@ func TestShellySetFailureReturnsAndRecordsConfiguredSafeState(
 	server, sharedStatus := newTestServer(false, client)
 
 	req := httptest.NewRequest(
-		"GET",
+		http.MethodGet,
 		"http://gateway/on",
 		nil,
 	)
 	res := httptest.NewRecorder()
 	server.handleFBSRequest(res, req, testTool())
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
 
 	if got := res.Body.String(); got != `{"Success":1,"State":0}` {
 		t.Fatalf("body = %q, want safe-off response", got)
@@ -185,37 +368,5 @@ func TestShellySetFailureReturnsAndRecordsConfiguredSafeState(
 	row := sharedStatus.Snapshot()[0]
 	if row.Connected || row.Output || row.Error != "set failed" {
 		t.Fatalf("shared failure status = %#v", row)
-	}
-}
-
-func TestUnknownRequestReturnsSafeStateWithoutChangingRelayOrStatus(
-	t *testing.T,
-) {
-	client := &fakeShellyClient{}
-	server, sharedStatus := newTestServer(false, client)
-	before := sharedStatus.Snapshot()
-
-	req := httptest.NewRequest(
-		"GET",
-		"http://gateway/not-a-command",
-		nil,
-	)
-	res := httptest.NewRecorder()
-	server.handleFBSRequest(res, req, testTool())
-
-	if len(client.setCalls) != 0 {
-		t.Fatalf("unexpected Set calls: %v", client.setCalls)
-	}
-	if got := res.Body.String(); got != `{"Success":1,"State":0}` {
-		t.Fatalf("body = %q, want safe-off response", got)
-	}
-
-	after := sharedStatus.Snapshot()
-	if len(after) != len(before) || after[0] != before[0] {
-		t.Fatalf(
-			"unknown request changed shared status: before=%#v after=%#v",
-			before,
-			after,
-		)
 	}
 }

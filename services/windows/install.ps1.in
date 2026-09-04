@@ -17,6 +17,7 @@ $FirewallRuleName = 'FBS Interlock Gateway - Authorized FBS Source'
 $InstallDirectory = [IO.Path]::GetFullPath('@WINDOWS_INSTALL_DIR@')
 $ConfigDirectory = [IO.Path]::GetFullPath('@WINDOWS_CONFIG_DIR@')
 $ConfigPath = [IO.Path]::GetFullPath('@WINDOWS_CONFIG_PATH@')
+$DatabasePath = [IO.Path]::GetFullPath('@WINDOWS_DB_PATH@')
 $TlsDirectory = [IO.Path]::GetFullPath('@WINDOWS_TLS_DIR@')
 $LogDirectory = [IO.Path]::GetFullPath('@WINDOWS_LOG_DIR@')
 
@@ -438,14 +439,22 @@ function Install-ApplicationFiles {
 function Set-InstalledPermissions {
     Write-Host "Restricting installed files to Administrators, SYSTEM, and $LocalServiceAccount..."
 
-    Set-RestrictedDirectoryAcl `
-        -Path $InstallDirectory `
-        -ServiceRights ([Security.AccessControl.FileSystemRights]::ReadAndExecute)
+    if ($ConfigDirectory -eq $InstallDirectory) {
+        # SQLite and the generated YAML rollback mirror both require atomic
+        # writes in the configuration directory. Managed executables/scripts
+        # are restricted individually below.
+        Set-RestrictedDirectoryAcl `
+            -Path $InstallDirectory `
+            -ServiceRights ([Security.AccessControl.FileSystemRights]::Modify)
+    }
+    else {
+        Set-RestrictedDirectoryAcl `
+            -Path $InstallDirectory `
+            -ServiceRights ([Security.AccessControl.FileSystemRights]::ReadAndExecute)
 
-    if ($ConfigDirectory -ne $InstallDirectory) {
         Set-RestrictedDirectoryAcl `
             -Path $ConfigDirectory `
-            -ServiceRights ([Security.AccessControl.FileSystemRights]::ReadAndExecute)
+            -ServiceRights ([Security.AccessControl.FileSystemRights]::Modify)
     }
 
     Set-RestrictedDirectoryAcl `
@@ -466,7 +475,13 @@ function Set-InstalledPermissions {
 
     Set-RestrictedFileAcl `
         -Path $ConfigPath `
-        -ServiceRights ([Security.AccessControl.FileSystemRights]::Read)
+        -ServiceRights ([Security.AccessControl.FileSystemRights]::Modify)
+
+    if (Test-Path -LiteralPath $DatabasePath -PathType Leaf) {
+        Set-RestrictedFileAcl `
+            -Path $DatabasePath `
+            -ServiceRights ([Security.AccessControl.FileSystemRights]::Modify)
+    }
 
     foreach ($tlsPath in @(
         $ServerCaDestination,
@@ -624,6 +639,22 @@ function Wait-ForAdminApi {
     return $false
 }
 
+function Assert-DatabaseReady {
+    Write-Host 'Verifying the SQLite configuration database...'
+
+    if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) {
+        throw "Gateway did not create the SQLite configuration database: $DatabasePath"
+    }
+
+    if ((Get-Item -LiteralPath $DatabasePath).Length -le 0) {
+        throw "Gateway created an empty SQLite configuration database: $DatabasePath"
+    }
+
+    Set-RestrictedFileAcl `
+        -Path $DatabasePath `
+        -ServiceRights ([Security.AccessControl.FileSystemRights]::Modify)
+}
+
 function Restore-PreviousInstallation {
     param(
         [string]$BackupDirectory,
@@ -646,6 +677,17 @@ function Restore-PreviousInstallation {
     Restore-Path -Path $StartScriptDestination -Key 'start.bat' -BackupDirectory $BackupDirectory
     Restore-Path -Path $UpdateScriptDestination -Key 'update.ps1' -BackupDirectory $BackupDirectory
     Restore-Path -Path $UpdateBatchDestination -Key 'update.bat' -BackupDirectory $BackupDirectory
+
+    Remove-Item -LiteralPath "$DatabasePath-journal" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$DatabasePath-wal" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$DatabasePath-shm" -Force -ErrorAction SilentlyContinue
+    Restore-Path -Path $DatabasePath -Key 'gateway.sqlite3' -BackupDirectory $BackupDirectory
+
+    if (Test-Path -LiteralPath $DatabasePath -PathType Leaf) {
+        Set-RestrictedFileAcl `
+            -Path $DatabasePath `
+            -ServiceRights ([Security.AccessControl.FileSystemRights]::Modify)
+    }
 
     if ($MainTaskXml) {
         Register-ScheduledTask `
@@ -711,6 +753,7 @@ try {
     Backup-Path -Path $StartScriptDestination -Key 'start.bat' -BackupDirectory $backupDirectory
     Backup-Path -Path $UpdateScriptDestination -Key 'update.ps1' -BackupDirectory $backupDirectory
     Backup-Path -Path $UpdateBatchDestination -Key 'update.bat' -BackupDirectory $backupDirectory
+    Backup-Path -Path $DatabasePath -Key 'gateway.sqlite3' -BackupDirectory $backupDirectory
 
     Install-ApplicationFiles
     Set-InstalledPermissions
@@ -724,6 +767,8 @@ try {
     if (-not (Wait-ForAdminApi)) {
         throw "The Admin API did not become ready at $AdminStatusUrl."
     }
+
+    Assert-DatabaseReady
 
     Write-Host ''
     Write-Host 'Installed executable:'
@@ -744,6 +789,10 @@ try {
 
     Write-Host ''
     Write-Host "Admin API is responding at: $AdminStatusUrl"
+    Write-Host 'Authoritative SQLite configuration:'
+    Write-Host "  $DatabasePath"
+    Write-Host 'Legacy YAML / rollback mirror:'
+    Write-Host "  $ConfigPath"
     Write-Host "Firewall permits only $FbsSourceIp to TCP ports $FbsPortRange."
     Write-Host "Gateway runtime account: $LocalServiceAccount"
     Write-Host ''
