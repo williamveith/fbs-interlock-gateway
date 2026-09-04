@@ -10,6 +10,9 @@ const DEFAULT_STARTING_PORT = 8081;
 const MIN_PORT = 8081;
 const MAX_PORT = 8981;
 const NOTIFICATION_DURATION_MS = 5000;
+const PASSWORD_LENGTH = 32;
+const PASSWORD_CHARACTERS =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
 const STATUS_HEADERS = [
     'Tool',
@@ -725,17 +728,99 @@ function createConfigRow(tool, index) {
     }));
 
     const passwordCell = document.createElement('td');
+
+    const passwordWrapper = document.createElement('div');
+
+    Object.assign(passwordWrapper.style, {
+        position: 'relative',
+        display: 'inline-block',
+        width: '100%'
+    });
+
     const passwordInput = createInput({
         type: 'password',
         value: '',
         field: 'password',
         index
     });
+
     passwordInput.placeholder = tool.password_set
         ? 'Password Set'
         : 'No Password Set';
+
     passwordInput.autocomplete = 'new-password';
-    passwordCell.appendChild(passwordInput);
+    passwordInput.minLength = PASSWORD_LENGTH;
+    passwordInput.maxLength = PASSWORD_LENGTH;
+    passwordInput.pattern = '[A-Za-z0-9]{32}';
+    passwordInput.spellcheck = false;
+
+    Object.assign(passwordInput.style, {
+        width: '100%',
+        boxSizing: 'border-box',
+        paddingRight: '2.25rem'
+    });
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+
+    const generatePasswordIcon = document.createElementNS(svgNS, 'svg');
+
+    generatePasswordIcon.classList.add('generate-password-icon');
+    generatePasswordIcon.dataset.index = String(index);
+
+    generatePasswordIcon.setAttribute('width', '20');
+    generatePasswordIcon.setAttribute('height', '20');
+    generatePasswordIcon.setAttribute('viewBox', '0 0 24 24');
+    generatePasswordIcon.setAttribute('fill', 'none');
+    generatePasswordIcon.setAttribute('stroke', 'currentColor');
+    generatePasswordIcon.setAttribute('stroke-width', '2');
+    generatePasswordIcon.setAttribute('stroke-linecap', 'round');
+    generatePasswordIcon.setAttribute('stroke-linejoin', 'round');
+    generatePasswordIcon.setAttribute(
+        'aria-label',
+        'Generate password'
+    );
+    generatePasswordIcon.setAttribute(
+        'title',
+        'Generate 32-character password'
+    );
+
+    Object.assign(generatePasswordIcon.style, {
+        position: 'absolute',
+        top: '50%',
+        right: '10px',
+        transform: 'translateY(-50%)',
+        cursor: 'pointer'
+    });
+
+    const circle = document.createElementNS(svgNS, 'circle');
+    circle.setAttribute('cx', '12');
+    circle.setAttribute('cy', '12');
+    circle.setAttribute('r', '10');
+
+    const verticalLine = document.createElementNS(svgNS, 'line');
+    verticalLine.setAttribute('x1', '12');
+    verticalLine.setAttribute('y1', '8');
+    verticalLine.setAttribute('x2', '12');
+    verticalLine.setAttribute('y2', '16');
+
+    const horizontalLine = document.createElementNS(svgNS, 'line');
+    horizontalLine.setAttribute('x1', '8');
+    horizontalLine.setAttribute('y1', '12');
+    horizontalLine.setAttribute('x2', '16');
+    horizontalLine.setAttribute('y2', '12');
+
+    generatePasswordIcon.append(
+        circle,
+        verticalLine,
+        horizontalLine
+    );
+
+    passwordWrapper.append(
+        passwordInput,
+        generatePasswordIcon
+    );
+
+    passwordCell.appendChild(passwordWrapper);
 
     const deleteCell = document.createElement('td');
     deleteCell.style.textAlign = 'center';
@@ -797,34 +882,34 @@ function renderConfig() {
 
 function parseInputValue(input) {
     switch (input.dataset.field) {
-    case 'enabled':
-        return input.checked;
+        case 'enabled':
+            return input.checked;
 
-    case 'port':
-    case 'switch_id':
-        return input.value === ''
-            ? 0
-            : Number(input.value);
+        case 'port':
+        case 'switch_id':
+            return input.value === ''
+                ? 0
+                : Number(input.value);
 
-    case 'interlock_name':
-    case 'ip':
-        return input.value.trim();
+        case 'interlock_name':
+        case 'ip':
+            return input.value.trim();
 
-    case 'protocol':
-        return input.value.trim().toLowerCase();
+        case 'protocol':
+            return input.value.trim().toLowerCase();
 
-    case 'username':
-        return input.value === ''
-            ? null
-            : input.value;
+        case 'username':
+            return input.value === ''
+                ? null
+                : input.value;
 
-    case 'password':
-        return input.value === ''
-            ? null
-            : input.value;
+        case 'password':
+            return input.value === ''
+                ? null
+                : input.value;
 
-    default:
-        return input.value;
+        default:
+            return input.value;
     }
 }
 
@@ -863,10 +948,54 @@ function handleConfigInput(event) {
     }
 }
 
+function handleGeneratePassword(index) {
+    if (!Number.isInteger(index) || !config?.tools[index]) {
+        return;
+    }
+
+    const passwordInput = document.querySelector(
+        `#configTable input[data-field="password"]` +
+        `[data-index="${index}"]`
+    );
+
+    if (!passwordInput) {
+        return;
+    }
+
+    const password = generatePassword();
+    const tool = config.tools[index];
+
+    passwordInput.value = password;
+
+    tool.password = password;
+    tool.password_set = true;
+    tool.clear_password = false;
+
+    validateConfigInputs();
+
+    passwordInput.focus();
+    passwordInput.select();
+}
+
 function handleConfigClick(event) {
+    if (!config) {
+        return;
+    }
+
+    const generatePasswordIcon = event.target.closest(
+        '.generate-password-icon'
+    );
+
+    if (generatePasswordIcon) {
+        handleGeneratePassword(
+            Number(generatePasswordIcon.dataset.index)
+        );
+        return;
+    }
+
     const deleteButton = event.target.closest('.delete-trigger');
 
-    if (!deleteButton || !config) {
+    if (!deleteButton) {
         return;
     }
 
@@ -886,6 +1015,35 @@ function enableConfigEventDelegation() {
     table.addEventListener('input', handleConfigInput);
     table.addEventListener('change', handleConfigInput);
     table.addEventListener('click', handleConfigClick);
+}
+
+function generatePassword() {
+    const characterCount = PASSWORD_CHARACTERS.length;
+    const unbiasedLimit = Math.floor(256 / characterCount) * characterCount;
+
+    let password = '';
+
+    while (password.length < PASSWORD_LENGTH) {
+        const randomBytes = new Uint8Array(
+            (PASSWORD_LENGTH - password.length) * 2
+        );
+
+        crypto.getRandomValues(randomBytes);
+
+        for (const value of randomBytes) {
+            if (value >= unbiasedLimit) {
+                continue;
+            }
+
+            password += PASSWORD_CHARACTERS[value % characterCount];
+
+            if (password.length === PASSWORD_LENGTH) {
+                break;
+            }
+        }
+    }
+
+    return password;
 }
 
 // =========================
@@ -1066,6 +1224,25 @@ function validateConfigInputs({ report = false } = {}) {
             if (!input.checkValidity() && !firstInvalid) {
                 firstInvalid = input;
             }
+        }
+    }
+
+    const passwordInputs = [
+        ...table.querySelectorAll('[data-field="password"]')
+    ];
+
+    for (const input of passwordInputs) {
+        const value = input.value;
+
+        const message =
+            value === '' || /^[A-Za-z0-9]{32}$/.test(value)
+                ? ''
+                : 'Password must be exactly 32 alphanumeric characters.';
+
+        input.setCustomValidity(message);
+
+        if (!input.checkValidity() && !firstInvalid) {
+            firstInvalid = input;
         }
     }
 

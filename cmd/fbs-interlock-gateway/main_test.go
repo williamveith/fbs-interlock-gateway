@@ -31,7 +31,7 @@ tools:
     port: 8081
     switch_id: 0
     username: "admin"
-    password: "secret"
+    password: "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
     enabled: true
 `
 	if err := os.WriteFile(configPath, []byte(legacy), 0640); err != nil {

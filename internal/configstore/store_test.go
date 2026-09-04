@@ -196,8 +196,9 @@ func toolID(t *testing.T, store *Store, name string) int64 {
 
 func testConfig() config.Config {
 	username := "admin"
-	password1 := "password-one"
-	password2 := "password-two"
+	password1 := "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+	password2 := "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+
 	return config.Config{
 		Bind: "0.0.0.0",
 		Defaults: config.Defaults{
@@ -231,5 +232,66 @@ func testConfig() config.Config {
 				Enabled:       false,
 			},
 		},
+	}
+}
+
+func TestStoreRejectsInvalidPassword(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
+	if err != nil {
+		t.Fatalf("Open returned an error: %v", err)
+	}
+	defer store.Close()
+
+	cfg := testConfig()
+	password := "not-32-characters"
+	cfg.Tools[0].Password = &password
+
+	if err := store.Initialize(cfg); err == nil {
+		t.Fatal("expected invalid password to be rejected")
+	}
+}
+
+func TestStoreRejectsInterlockNameOver16Characters(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
+	if err != nil {
+		t.Fatalf("Open returned an error: %v", err)
+	}
+	defer store.Close()
+
+	cfg := testConfig()
+	cfg.Tools[0].InterlockName = "EQU-THIS-NAME-IS-TOO-LONG"
+
+	if err := store.Initialize(cfg); err == nil {
+		t.Fatal("expected interlock name over 16 characters to be rejected")
+	}
+}
+
+func TestStoreRejectsDuplicateInterlockName(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
+	if err != nil {
+		t.Fatalf("Open returned an error: %v", err)
+	}
+	defer store.Close()
+
+	cfg := testConfig()
+	cfg.Tools[1].InterlockName = cfg.Tools[0].InterlockName
+
+	if err := store.Initialize(cfg); err == nil {
+		t.Fatal("expected duplicate interlock name to be rejected")
+	}
+}
+
+func TestStoreRejectsDuplicateIP(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "gateway.sqlite3"), Options{})
+	if err != nil {
+		t.Fatalf("Open returned an error: %v", err)
+	}
+	defer store.Close()
+
+	cfg := testConfig()
+	cfg.Tools[1].IP = cfg.Tools[0].IP
+
+	if err := store.Initialize(cfg); err == nil {
+		t.Fatal("expected duplicate IP to be rejected")
 	}
 }

@@ -150,16 +150,27 @@ CREATE TABLE gateway_settings (
 CREATE TABLE tools (
     id INTEGER PRIMARY KEY,
     sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
-    interlock_name TEXT NOT NULL CHECK (length(trim(interlock_name)) > 0),
+    interlock_name TEXT NOT NULL
+        CHECK (
+            interlock_name = trim(interlock_name)
+            AND length(interlock_name) BETWEEN 1 AND 16
+        ),
     ip TEXT NOT NULL CHECK (length(trim(ip)) > 0),
     protocol TEXT NOT NULL CHECK (protocol IN ('http', 'https')),
     port INTEGER NOT NULL CHECK (port BETWEEN 8081 AND 8981),
     switch_id INTEGER NOT NULL CHECK (switch_id >= 0),
     username TEXT,
-    password TEXT,
+    password TEXT CHECK (
+        password IS NULL OR (
+            length(password) = 32
+            AND password NOT GLOB '*[^0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]*'
+        )
+    ),
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    UNIQUE(interlock_name),
+    UNIQUE(ip),
     UNIQUE(port),
     UNIQUE(sort_order)
 ) STRICT;
