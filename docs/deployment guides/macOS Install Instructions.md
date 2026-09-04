@@ -2,7 +2,7 @@
 title: "FBS Interlock Gateway"
 subtitle: "macOS Installation and Operations Guide"
 author: "William Veith"
-date: "2026-08-06"
+date: "2026-09-04"
 lang: en-US
 ---
 
@@ -98,7 +98,7 @@ Before building or installing, confirm the following:
 
 - The repository is on the intended commit or release.
 - `make verify` completes successfully.
-- `config.yaml` contains the intended non-production or production configuration.
+- The packaged `config.yaml` contains the intended seed configuration for a fresh installation or legacy rollback. After first startup, `gateway.sqlite3` becomes authoritative.
 - `make ca` and `make gateway-cert` have populated the required certificate material under `pki/ca/` and `pki/gateway/`.
 - The selected build target matches the gateway Mac architecture.
 - The configured FBS listener ports do not conflict with other services.
@@ -304,7 +304,7 @@ sudo ./install.sh --development
 Development mode:
 
 - Installs the local gateway binary and all production security controls
-- Preserves the production configuration and installed TLS files
+- Preserves the authoritative SQLite configuration, YAML rollback/compatibility state, and installed TLS files
 - Stops and disables the update LaunchDaemon
 - Removes the installed updater script and update plist
 - Prevents the development binary from being replaced by the latest published release
@@ -359,7 +359,7 @@ The installer validates the packaged binary architecture and executes its `-vers
 
 > **Reinstallation behavior**
 >
-> Reinstallation preserves the active production `config.yaml` and installed TLS files. It corrects their ownership and modes but does not replace their contents.
+> Reinstallation preserves the authoritative `gateway.sqlite3` database, the YAML rollback mirror, and installed TLS files. It corrects ownership and modes without replacing persistent configuration.
 
 # What the Installer Does
 
@@ -369,7 +369,7 @@ The installer performs the following operations.
 
 - Verifies that the installer is running on macOS
 - Elevates through `sudo` when required
-- Requires the binary, config, startup wrapper, gateway plist, Packet Filter anchor, and all three TLS files
+- Requires the binary, seed config, startup wrapper, gateway plist, Packet Filter anchor, and all three TLS files
 - Requires the updater and update plist in production mode
 - Validates generated property lists with `plutil`
 - Confirms the binary is a Mach-O executable for the current architecture
@@ -385,7 +385,13 @@ The installer performs the following operations.
 
 - Installs the binary and startup wrapper under `/usr/local/libexec/fbs-interlock-gateway/`
 - Runs the gateway with `/Library/Application Support/fbs-interlock-gateway` as its working directory
-- Installs or preserves `config.yaml` with service-account ownership and mode `0640`
+- Starts the gateway with explicit `-config` and `-db` paths
+- Installs or preserves `config.yaml` with service-account access and mode `0640`
+- Uses `/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3` as the authoritative database path
+- On first successful startup, imports the legacy YAML if the database is uninitialized
+- Leaves the original human-authored YAML untouched during the first import
+- Treats `gateway.sqlite3` as authoritative after initialization
+- Later Admin saves generate a YAML compatibility mirror and preserve the previous YAML as `config.yaml.bak` when possible
 - Removes the executable quarantine attribute when present
 
 ## Gateway TLS files
@@ -393,16 +399,27 @@ The installer performs the following operations.
 - Creates `/Library/Application Support/fbs-interlock-gateway/tls/`
 - Installs new runtime TLS files with `root:_fbs-gateway` ownership and mode `0640`
 - Preserves existing installed TLS files during reinstallation
-- Verifies that `_fbs-gateway` can read the config and every TLS file
+- Verifies that `_fbs-gateway` can read the YAML rollback mirror and every TLS file
+
+## SQLite state validation
+
+- Stops the existing gateway before taking the installation rollback copy of `gateway.sqlite3`
+- Backs up the database when present
+- Verifies that `_fbs-gateway` can create and remove files in `/Library/Application Support/fbs-interlock-gateway/`
+- Starts the gateway and waits for the Admin API
+- Verifies that `gateway.sqlite3` exists, is non-empty, and is readable and writable by `_fbs-gateway`
+- Removes transient SQLite sidecar files before restoring a database during installation rollback
 
 ## LaunchDaemons
 
 - Installs the main gateway LaunchDaemon
+- Explicitly enables the main LaunchDaemon before bootstrapping it into `launchd`
 - Uses a ten-second restart throttle
 - Uses a 30-second exit timeout and restrictive process umask
 - Starts the gateway immediately and waits for the Admin API health check
 - Installs the update LaunchDaemon only in production mode
 - Schedules production updates at minute 17 of every hour
+- Restores prior enabled/loaded state during installation rollback when possible
 
 ## Firewall controls
 
@@ -431,11 +448,11 @@ Gateway logs are owned by the gateway service account. Update logs are owned by 
 
 ## Rollback and health validation
 
-Before replacing an existing installation, the installer backs up the currently installed binary, wrappers, plists, Packet Filter anchor, and `/etc/pf.conf` into a temporary rollback directory.
+Before replacing an existing installation, the installer backs up the currently installed binary, wrappers, plists, Packet Filter anchor, `/etc/pf.conf`, and authoritative SQLite database when present.
 
-If Packet Filter validation, LaunchDaemon loading, or the Admin API health check fails, the installer restores the previous executable and service/network files and attempts to restart the previous installation.
+If Packet Filter validation, LaunchDaemon loading, Admin API health validation, or SQLite validation fails, the installer restores the previous executable, service/network files, and database and attempts to restart the previous installation.
 
-The preserved production config and TLS files are not replaced during normal installation.
+The preserved YAML rollback mirror and installed TLS files are not replaced during normal installation.
 
 # Installed Layout
 
@@ -448,16 +465,20 @@ The preserved production config and TLS files are not replaced during normal ins
 └── update.sh                 # production mode only
 ```
 
-## Configuration and TLS
+## Authoritative configuration, rollback mirror, and TLS
 
 ```text
 /Library/Application Support/fbs-interlock-gateway/
-├── config.yaml
+├── gateway.sqlite3           # authoritative SQLite configuration
+├── config.yaml               # first-run seed; later generated rollback mirror
+├── config.yaml.bak           # previous YAML mirror when available
 └── tls/
     ├── server-ca.crt
     ├── gateway-client.crt
     └── gateway-client.key
 ```
+
+After `gateway.sqlite3` is initialized, manual edits to `config.yaml` are ignored by normal gateway startup. Use the Admin UI or the documented export/import workflow to change the authoritative configuration.
 
 ## LaunchDaemons
 
@@ -566,7 +587,26 @@ Example FBS listener port:
 sudo lsof -nP -iTCP:8081 -sTCP:LISTEN
 ```
 
-## Verify configuration and TLS permissions
+## Verify configuration database, rollback mirror, and TLS permissions
+
+Confirm the authoritative database exists and is non-empty:
+
+```bash
+sudo test -s \
+  "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3"
+```
+
+Confirm `_fbs-gateway` can read and write it:
+
+```bash
+sudo -u _fbs-gateway test -r \
+  "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3"
+
+sudo -u _fbs-gateway test -w \
+  "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3"
+```
+
+Confirm the service account can read the YAML rollback mirror and runtime TLS files:
 
 ```bash
 sudo -u _fbs-gateway test -r \
@@ -737,18 +777,21 @@ The updater:
 
 1. Acquires a lock so concurrent update runs exit safely.
 2. Detects Apple Silicon or Intel architecture.
-3. Downloads the latest release checksum first.
-4. Computes the installed binary SHA-256 with `shasum -a 256`.
-5. Exits without downloading the binary when the checksum already matches and logs do not need rotation.
-6. Downloads the matching `darwin-arm64` or `darwin-amd64` release only when needed.
-7. Verifies the downloaded checksum and Mach-O architecture.
-8. Creates a timestamped backup of the installed binary.
-9. Stops the gateway only when it was loaded before maintenance.
-10. Installs and verifies the new binary.
-11. Restarts the gateway and waits for the Admin API.
-12. Restores the previous binary when the post-update health check fails.
+3. Downloads the matching `.sha256` file and detached `.sha256.sig`.
+4. Uses the currently installed gateway binary to authenticate the signed checksum and asset name.
+5. Computes the installed binary SHA-256 with `shasum -a 256`.
+6. Exits without downloading the binary when the authenticated checksum already matches and logs do not need rotation.
+7. Downloads the matching `darwin-arm64` or `darwin-amd64` release only when needed.
+8. Verifies the downloaded checksum, Mach-O architecture, and version metadata and rejects authenticated downgrades.
+9. Creates a timestamped backup of the installed binary.
+10. Stops the gateway only when it was loaded before maintenance.
+11. Installs and verifies the new binary.
+12. Restarts the gateway and waits for the Admin API.
+13. Restores the previous binary when the post-update health check fails.
 
-The updater changes only the application binary and gateway log files. It does not modify `config.yaml` or installed TLS files.
+The updater does not intentionally replace `gateway.sqlite3`, the YAML rollback mirror, or installed TLS files. The Admin API health check confirms that the updated process successfully opened its configured SQLite database before the update is accepted.
+
+Installation-time rollback is separate: `install.sh` backs up and restores `gateway.sqlite3` when a new local installation fails validation.
 
 ## Log rotation
 
@@ -849,11 +892,19 @@ phase=response_body
 
 # Edit the Configuration
 
-The active configuration is:
+The authoritative configuration is:
+
+```text
+/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3
+```
+
+The compatibility/rollback YAML is:
 
 ```text
 /Library/Application Support/fbs-interlock-gateway/config.yaml
 ```
+
+`config.yaml` is used as an import source only while the SQLite database is uninitialized. Once `gateway.sqlite3` contains configuration, normal startup loads SQLite and ignores manual edits to the YAML file.
 
 ## Preferred method: Admin UI
 
@@ -861,42 +912,57 @@ The active configuration is:
 http://127.0.0.1:18090
 ```
 
-The Admin UI validates fields, preserves stored passwords unless explicitly replaced or cleared, writes the configuration atomically, and requests a clean gateway restart.
+The Admin UI validates the complete proposed configuration, preserves stored passwords unless explicitly replaced or cleared, commits the change transactionally to SQLite, writes a generated YAML compatibility mirror when possible, preserves the previous YAML as `config.yaml.bak`, and requests a clean gateway restart.
 
-## Manual method
+## Manual method: export, edit, and import
+
+Export the authoritative database:
 
 ```bash
-sudo nano \
-  "/Library/Application Support/fbs-interlock-gateway/config.yaml"
+sudo "/usr/local/libexec/fbs-interlock-gateway/fbs-interlock-gateway" \
+  config export \
+  -db "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3" \
+  -output /tmp/fbs-interlock-gateway.yaml
 ```
 
-Recommended TLS paths are relative to the configuration directory:
+Edit the exported YAML:
 
-```yaml
-bind: "0.0.0.0"
-
-defaults:
-  timeout_ms: 10000
-  safe_state_on_error: "off"
-  shelly_tls:
-    server_ca_file: "./tls/server-ca.crt"
-    client_cert_file: "./tls/gateway-client.crt"
-    client_key_file: "./tls/gateway-client.key"
-
-tools:
-  - interlock_name: "EQU-EXAMPLE-TOOL-01"
-    ip: "2c41389b0d77.dynamic.utexas.edu"
-    protocol: "https"
-    port: 8081
-    switch_id: 0
-    username: "admin"
-    password: "example-password"
-    enabled: true
+```bash
+sudo nano /tmp/fbs-interlock-gateway.yaml
 ```
 
-The LaunchDaemon and startup wrapper use the configuration directory as the working directory. The gateway also resolves relative TLS paths against the directory containing the loaded configuration.
+Import the complete edited configuration transactionally and refresh the YAML rollback mirror:
 
-Restart the gateway after manually editing the configuration.
+```bash
+sudo "/usr/local/libexec/fbs-interlock-gateway/fbs-interlock-gateway" \
+  config import \
+  -db "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3" \
+  -input /tmp/fbs-interlock-gateway.yaml \
+  -mirror-config "/Library/Application Support/fbs-interlock-gateway/config.yaml"
+```
+
+Restart the gateway after a successful CLI import:
+
+```bash
+sudo launchctl kickstart -k \
+  system/com.williamveith.fbs-interlock-gateway
+```
+
+For review or sharing, create a redacted export:
+
+```bash
+sudo "/usr/local/libexec/fbs-interlock-gateway/fbs-interlock-gateway" \
+  config export \
+  -db "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3" \
+  -output /tmp/fbs-interlock-gateway-redacted.yaml \
+  -redact-secrets
+```
+
+Do not import a redacted export as production configuration; stored passwords are replaced with the literal value `REDACTED`.
+
+> **Do not edit `config.yaml` as the normal configuration workflow**
+>
+> After SQLite initialization, direct YAML edits do not change the running configuration. Use the Admin UI or `config export` / `config import`.
 
 > **Configuration rule**
 >
@@ -1076,7 +1142,7 @@ Confirm the Admin UI was not disabled through an empty Admin address.
 sudo lsof -nP -iTCP:8081 -sTCP:LISTEN
 ```
 
-Review the active configuration and confirm the tool is enabled.
+Review the authoritative configuration through the Admin UI or export `gateway.sqlite3`, and confirm the tool is enabled.
 
 ## Packet Filter rule is not active
 
@@ -1210,10 +1276,17 @@ Standard uninstall:
 - Removes the executable, startup wrapper, and updater
 - Removes the executable from the Application Firewall
 - Removes the managed `pf` anchor and managed `/etc/pf.conf` block
-- Preserves `config.yaml`
+- Preserves `gateway.sqlite3`
+- Preserves the YAML rollback mirror `config.yaml`
 - Preserves installed TLS files
 - Preserves gateway and update logs
 - Preserves the hidden service account
+
+The preserved authoritative database remains at:
+
+```text
+/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3
+```
 
 ## Purge persistent data
 
@@ -1228,7 +1301,7 @@ Purge performs the standard uninstall and also removes:
 /Library/Logs/fbs-interlock-gateway/
 ```
 
-This deletes the production configuration, installed TLS files, and logs. The hidden service account is still preserved for safe reinstallation.
+This deletes `gateway.sqlite3`, the YAML rollback mirror, installed TLS files, and logs. The hidden service account is still preserved for safe reinstallation.
 
 > **Destructive operation**
 >
@@ -1265,7 +1338,8 @@ Missing-service errors are expected after successful removal.
 | Show `pf` anchor | `sudo pfctl -a com.williamveith.fbs-interlock-gateway -sr` |
 | Follow gateway logs | `sudo tail -F "/Library/Logs/fbs-interlock-gateway/gateway.log" "/Library/Logs/fbs-interlock-gateway/gateway-error.log"` |
 | Follow update logs | `sudo tail -F "/Library/Logs/fbs-interlock-gateway/update.log" "/Library/Logs/fbs-interlock-gateway/update-error.log"` |
-| Edit config | `sudo nano "/Library/Application Support/fbs-interlock-gateway/config.yaml"` |
+| Export authoritative config | `sudo /usr/local/libexec/fbs-interlock-gateway/fbs-interlock-gateway config export -db "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3" -output /tmp/fbs-interlock-gateway.yaml` |
+| Import edited config | `sudo /usr/local/libexec/fbs-interlock-gateway/fbs-interlock-gateway config import -db "/Library/Application Support/fbs-interlock-gateway/gateway.sqlite3" -input /tmp/fbs-interlock-gateway.yaml -mirror-config "/Library/Application Support/fbs-interlock-gateway/config.yaml"` |
 | Standard uninstall | `sudo ./uninstall.sh` |
 | Purge uninstall | `sudo ./uninstall.sh --purge` |
 

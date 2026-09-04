@@ -2,7 +2,7 @@
 title: "FBS Interlock Gateway"
 subtitle: "Windows Installation and Operations Guide"
 author: "William Veith"
-date: "2026-08-07"
+date: "2026-09-04"
 lang: en-US
 ---
 
@@ -116,7 +116,7 @@ Before building or installing, confirm the following:
 
 - The repository is on the intended commit or release.
 - `make verify` completes successfully.
-- `config.yaml` contains the intended non-production or production configuration.
+- The packaged `config.yaml` contains the intended seed configuration for a fresh installation or legacy rollback. After first startup, `gateway.sqlite3` becomes authoritative.
 - `make ca` and `make gateway-cert` have populated the required certificate material under `pki/ca/` and `pki/gateway/`.
 - The Windows gateway is running a 64-bit version of Windows.
 - Windows PowerShell 5.1 is available.
@@ -280,7 +280,7 @@ Production mode:
 - Installs and starts the gateway task.
 - Installs the checksum-aware updater.
 - Registers the hourly update task.
-- Preserves an existing production configuration and installed TLS identity.
+- Preserves the authoritative SQLite configuration, YAML rollback/compatibility state, and installed TLS identity.
 - Performs gateway log rotation during managed maintenance.
 - Restores managed updates after a previous development installation.
 
@@ -295,7 +295,7 @@ install-dev.bat
 Development mode:
 
 - Installs the local executable and normal gateway task.
-- Preserves the production configuration and installed TLS files.
+- Preserves the authoritative SQLite configuration, YAML rollback/compatibility state, and installed TLS files.
 - Removes installed updater scripts.
 - Removes the managed update task.
 - Prevents the local development executable from being replaced by a published release.
@@ -343,7 +343,7 @@ The installer validates the packaged executable architecture and executes its `-
 
 > **Reinstallation behavior**
 >
-> Reinstallation preserves the active production `config.yaml` and installed TLS files. It corrects their permissions when required but does not replace their contents.
+> Reinstallation preserves the authoritative `gateway.sqlite3` database, the YAML rollback mirror, and installed TLS files. It corrects their permissions when required without replacing persistent configuration.
 
 # What the Installer Does
 
@@ -357,9 +357,10 @@ The installer performs the following operations.
 - Validates that the gateway executable is a runnable amd64 PE binary.
 - Executes the gateway binary's `-version` command.
 - Requires updater files when production mode is selected.
-- Captures the existing task definitions and installed executable files required for rollback.
+- Captures the existing task definitions and installed files required for rollback.
 - Stops the existing gateway and updater tasks before replacement.
 - Stops any remaining gateway process.
+- Backs up the current `gateway.sqlite3` when present before changing the installation.
 
 ## Runtime accounts and permissions
 
@@ -369,10 +370,12 @@ The main gateway task runs as:
 NT AUTHORITY\LOCAL SERVICE
 ```
 
-The installer grants this account only the access required for operation:
+The installer grants this account the access required for operation:
 
 - Read and execute access to the gateway executable and startup supervisor
-- Read access to `config.yaml`
+- Modify access to the configuration directory because SQLite and the generated YAML rollback mirror use local atomic writes
+- Modify access to `config.yaml`
+- Modify access to `gateway.sqlite3`
 - Read access to the gateway TLS certificate and private-key files
 - Modify access to the log directory
 
@@ -382,15 +385,15 @@ The production update task runs as:
 SYSTEM
 ```
 
-Administrative execution is limited to the maintenance workflow because it must download and verify releases, stop and start the gateway task, replace the protected executable, restore a previous executable after a failed health check, and rotate protected log files.
+Administrative execution is limited to the maintenance workflow because it must download and verify releases, stop and start the gateway task, replace the protected executable, preserve or restore the SQLite database during update rollback, and rotate protected log files.
 
 The installation tree is restricted to:
 
 - Local Administrators: full control
 - `SYSTEM`: full control
-- `LOCAL SERVICE`: minimum runtime access
+- `LOCAL SERVICE`: only the runtime access described above
 
-Other ordinary local users are not granted direct access to the gateway configuration or client private key.
+Other ordinary local users are not granted direct access to the authoritative database, YAML rollback mirror, or client private key.
 
 ## Application and configuration
 
@@ -398,8 +401,14 @@ Other ordinary local users are not granted direct access to the gateway configur
 - Installs `fbs-interlock-gateway.exe`.
 - Installs the `start.bat` restart supervisor.
 - Installs updater scripts only in production mode.
+- Preserves an existing `gateway.sqlite3`.
 - Preserves an existing `config.yaml`.
-- Installs the packaged `config.yaml` when no active configuration exists.
+- Installs the packaged `config.yaml` when no seed/rollback YAML exists.
+- Starts the gateway with explicit `-config` and `-db` paths.
+- On first successful startup, imports the legacy YAML when the database is uninitialized.
+- Treats `gateway.sqlite3` as authoritative after initialization.
+- Leaves the original human-authored YAML untouched during first migration.
+- Later Admin saves generate a YAML compatibility mirror and preserve the previous YAML as `config.yaml.bak` when possible.
 
 ## Gateway TLS files
 
@@ -416,6 +425,8 @@ Other ordinary local users are not granted direct access to the gateway configur
 - Registers **FBS Interlock Gateway Update** under `SYSTEM` only in production mode.
 - Removes the managed update task and updater scripts in development mode.
 - Waits for the Admin API to become healthy after starting the gateway.
+- Verifies that `gateway.sqlite3` exists and is non-empty after startup.
+- Reapplies the restricted database ACL after creation.
 
 ## Firewall controls
 
@@ -441,46 +452,39 @@ The gateway account can modify gateway logs. The update task runs as `SYSTEM` an
 
 ## Rollback and health validation
 
-The installer captures the existing gateway executable, scripts, and task definitions needed for rollback before replacing an existing installation.
+The installer captures the existing gateway executable, scripts, task definitions, and authoritative SQLite database before replacing an existing installation.
 
-If installation fails after replacement, the installer restores the previous managed executable and task state when possible.
+If installation fails after replacement, the installer removes transient SQLite sidecar files, restores the prior `gateway.sqlite3` when it existed, restores the previous managed executable and task state, and reapplies the database ACL when possible.
 
-The preserved production configuration and installed TLS files are not replaced during normal reinstallation.
+The preserved YAML rollback mirror and installed TLS files are not replaced during normal reinstallation.
 
 # Installed Layout
 
-## Application directory
+## Application and persistent configuration directory
 
 With the default Makefile settings:
 
 ```text
 C:\FBS\fbs-interlock-gateway\
 ├── fbs-interlock-gateway.exe
+├── gateway.sqlite3          # authoritative SQLite configuration
+├── config.yaml              # first-run seed; later generated rollback mirror
+├── config.yaml.bak          # previous YAML mirror when available
 ├── start.bat
-├── update.bat              # production mode only
-└── update.ps1              # production mode only
+├── update.bat               # production mode only
+├── update.ps1               # production mode only
+├── tls\
+│   ├── server-ca.crt
+│   ├── gateway-client.crt
+│   └── gateway-client.key
+└── logs\
+    ├── gateway.log
+    ├── gateway-error.log
+    ├── update.log
+    └── update-error.log
 ```
 
-## Configuration and TLS
-
-```text
-C:\FBS\fbs-interlock-gateway\
-├── config.yaml
-└── tls\
-    ├── server-ca.crt
-    ├── gateway-client.crt
-    └── gateway-client.key
-```
-
-## Logs
-
-```text
-C:\FBS\fbs-interlock-gateway\logs\
-├── gateway.log
-├── gateway-error.log
-├── update.log
-└── update-error.log
-```
+After `gateway.sqlite3` is initialized, manual edits to `config.yaml` are ignored by normal gateway startup. Use the Admin UI or the documented export/import workflow to change the authoritative configuration.
 
 ## Scheduled Tasks
 
@@ -613,18 +617,22 @@ Get-NetTCPConnection `
     Sort-Object LocalPort
 ```
 
-## Verify configuration and TLS permissions
+## Verify configuration database, rollback mirror, and TLS permissions
 
-Confirm the required files exist:
+Confirm the required persistent files exist:
 
 ```powershell
-Get-Item C:\FBS\fbs-interlock-gateway\config.yaml
+Get-Item `
+    C:\FBS\fbs-interlock-gateway\gateway.sqlite3
+
+Get-Item `
+    C:\FBS\fbs-interlock-gateway\config.yaml
 
 Get-ChildItem `
     C:\FBS\fbs-interlock-gateway\tls
 ```
 
-Expected TLS files:
+`gateway.sqlite3` should be non-empty. Expected TLS files are:
 
 ```text
 server-ca.crt
@@ -632,15 +640,19 @@ gateway-client.crt
 gateway-client.key
 ```
 
-Inspect the private-key permissions:
+Inspect the database and private-key ACLs:
 
 ```powershell
+Get-Acl `
+    C:\FBS\fbs-interlock-gateway\gateway.sqlite3 |
+    Format-List
+
 Get-Acl `
     C:\FBS\fbs-interlock-gateway\tls\gateway-client.key |
     Format-List
 ```
 
-The ACL should retain access for Administrators and `SYSTEM`, with the runtime read access required by `LOCAL SERVICE`.
+The ACLs should retain full access for Administrators and `SYSTEM`. `LOCAL SERVICE` requires modify access to the SQLite database/configuration directory and read access to the TLS material.
 
 ## Verify Windows Defender Firewall
 
@@ -801,28 +813,29 @@ The updater:
 
 1. Requires administrative execution through the `SYSTEM` update task.
 2. Acquires an update lock to prevent overlapping update operations.
-3. Downloads the latest published SHA-256 checksum first.
-4. Calculates the installed executable SHA-256 checksum.
-5. Skips the executable download when the installed checksum already matches.
-6. Checks whether gateway logs require rotation.
-7. Downloads the release executable only when the checksum differs.
-8. Verifies the downloaded SHA-256 checksum.
-9. Verifies that the download is a valid amd64 PE executable.
-10. Runs the downloaded executable with `-version`.
-11. Backs up the current executable.
-12. Stops the gateway task only when replacement or log maintenance requires it.
-13. Rotates oversized gateway logs.
-14. Stages and verifies the replacement executable.
-15. Starts the gateway task.
-16. Waits for the Admin API health check.
-17. Restores the previous executable when the health check fails.
+3. Downloads the Windows AMD64 `.sha256` file and detached `.sha256.sig`.
+4. Uses the currently installed gateway binary to authenticate the signed checksum and asset name.
+5. Calculates the installed executable SHA-256 checksum.
+6. Skips the executable download when the installed checksum already matches and no log maintenance is required.
+7. Downloads the release executable only when the authenticated checksum differs.
+8. Verifies the downloaded SHA-256 checksum and amd64 PE format.
+9. Runs the downloaded executable with `-version` and rejects authenticated downgrades.
+10. Backs up the current executable and, when a replacement is required, the authoritative `gateway.sqlite3` plus its original ACL.
+11. Stops the gateway task only when replacement or log maintenance requires it.
+12. Rotates oversized gateway logs.
+13. Stages and verifies the replacement executable.
+14. Starts the gateway task.
+15. Waits for the Admin API and verifies that the SQLite database remains present and non-empty.
+16. Restores both the previous executable and previous SQLite database/ACL when the post-update health or database check fails.
 
-The updater modifies only the application executable and gateway log files. It does not replace:
+The updater does not intentionally replace the YAML rollback mirror or installed TLS files:
 
 - `config.yaml`
 - `server-ca.crt`
 - `gateway-client.crt`
 - `gateway-client.key`
+
+A new binary can open or migrate the authoritative database during startup. The database backup is therefore part of binary-update rollback.
 
 ## Log rotation
 
@@ -919,11 +932,19 @@ Press `Ctrl+C` to stop following a log.
 
 # Edit the Configuration
 
-The active configuration is:
+The authoritative configuration is:
+
+```text
+C:\FBS\fbs-interlock-gateway\gateway.sqlite3
+```
+
+The compatibility/rollback YAML is:
 
 ```text
 C:\FBS\fbs-interlock-gateway\config.yaml
 ```
+
+`config.yaml` is used as an import source only while the SQLite database is uninitialized. Once `gateway.sqlite3` contains configuration, normal startup loads SQLite and ignores manual edits to the YAML file.
 
 ## Preferred method: Admin UI
 
@@ -933,43 +954,65 @@ Open:
 http://127.0.0.1:18090
 ```
 
-The Admin UI validates fields, preserves stored passwords unless explicitly replaced or cleared, writes the configuration safely, and requests a clean gateway restart after a successful save.
+The Admin UI validates the complete proposed configuration, preserves stored passwords unless explicitly replaced or cleared, commits the change transactionally to SQLite, writes a generated YAML compatibility mirror when possible, preserves the previous YAML as `config.yaml.bak`, and requests a clean gateway restart.
 
-## Manual method
+## Manual method: export, edit, and import
 
-Run the editor as an administrator because ordinary users do not have write access to the protected configuration.
+Open PowerShell as an administrator.
 
-For example:
+Export the authoritative database:
+
+```powershell
+& 'C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe' `
+    config export `
+    -db 'C:\FBS\fbs-interlock-gateway\gateway.sqlite3' `
+    -output "$env:TEMP\fbs-interlock-gateway.yaml"
+```
+
+Edit the exported YAML:
 
 ```powershell
 Start-Process notepad.exe `
-    -ArgumentList "C:\FBS\fbs-interlock-gateway\config.yaml" `
-    -Verb RunAs
+    -ArgumentList "$env:TEMP\fbs-interlock-gateway.yaml" `
+    -Verb RunAs `
+    -Wait
 ```
 
-Recommended TLS paths are relative to the installation directory:
+Import the complete edited configuration transactionally and refresh the YAML rollback mirror:
 
-```yaml
-defaults:
-  shelly_tls:
-    server_ca_file: "./tls/server-ca.crt"
-    client_cert_file: "./tls/gateway-client.crt"
-    client_key_file: "./tls/gateway-client.key"
-
-tools:
-  - interlock_name: "EQU-EXAMPLE-TOOL-01"
-    ip: "2c41389b0d77.dynamic.utexas.edu"
-    protocol: "https"
-    port: 8081
-    switch_id: 0
-    username: "admin"
-    password: "example-password"
-    enabled: true
+```powershell
+& 'C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe' `
+    config import `
+    -db 'C:\FBS\fbs-interlock-gateway\gateway.sqlite3' `
+    -input "$env:TEMP\fbs-interlock-gateway.yaml" `
+    -mirror-config 'C:\FBS\fbs-interlock-gateway\config.yaml'
 ```
 
-The gateway task uses the installation directory as its working directory. The gateway also resolves relative TLS paths against the directory containing the loaded configuration.
+Restart the gateway task after a successful CLI import:
 
-Restart the gateway after manually editing the configuration.
+```powershell
+Stop-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
+
+Start-ScheduledTask `
+    -TaskName "FBS Interlock Gateway"
+```
+
+For review or sharing, create a redacted export:
+
+```powershell
+& 'C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe' `
+    config export `
+    -db 'C:\FBS\fbs-interlock-gateway\gateway.sqlite3' `
+    -output "$env:TEMP\fbs-interlock-gateway-redacted.yaml" `
+    -redact-secrets
+```
+
+Do not import a redacted export as production configuration; stored passwords are replaced with the literal value `REDACTED`.
+
+> **Do not edit `config.yaml` as the normal configuration workflow**
+>
+> After SQLite initialization, direct YAML edits do not change the running configuration. Use the Admin UI or `config export` / `config import`.
 
 > **Configuration rule**
 >
@@ -1159,13 +1202,17 @@ Test-NetConnection `
     -Port 8081
 ```
 
-Check the exact tool entry in `config.yaml` and review gateway logs for hostname resolution, authentication, timeout, TLS, or certificate errors.
+Check the authoritative configuration through the Admin UI or export `gateway.sqlite3`, then review gateway logs for hostname resolution, authentication, timeout, TLS, or certificate errors.
 
-## The gateway cannot read the configuration or TLS files
+## The gateway cannot read the database, rollback mirror, or TLS files
 
 Inspect the ACLs:
 
 ```powershell
+Get-Acl `
+    C:\FBS\fbs-interlock-gateway\gateway.sqlite3 |
+    Format-List
+
 Get-Acl `
     C:\FBS\fbs-interlock-gateway\config.yaml |
     Format-List
@@ -1175,7 +1222,7 @@ Get-Acl `
     Format-List
 ```
 
-Re-run `install.bat` as administrator to restore the intended permissions without replacing an existing configuration or TLS identity.
+Re-run `install.bat` as administrator to restore the intended database/configuration permissions without replacing the authoritative configuration or TLS identity.
 
 ## The Windows Defender Firewall rule is missing or incorrect
 
@@ -1357,14 +1404,17 @@ Standard uninstall removes:
 It preserves:
 
 ```text
+C:\FBS\fbs-interlock-gateway\gateway.sqlite3
 C:\FBS\fbs-interlock-gateway\config.yaml
 C:\FBS\fbs-interlock-gateway\tls\
 C:\FBS\fbs-interlock-gateway\logs\
 ```
 
-## Purge persistent configuration and TLS
+`gateway.sqlite3` remains the authoritative configuration; `config.yaml` remains the first-run/rollback compatibility copy.
 
-A purge also removes the configuration, TLS files, and logs.
+## Purge persistent configuration, SQLite state, TLS, and logs
+
+A purge also removes the authoritative database, YAML rollback mirror, TLS files, and logs.
 
 Open an elevated Command Prompt in the deployment directory:
 
@@ -1384,7 +1434,7 @@ PowerShell.exe `
 
 > **Destructive operation**
 >
-> Purge deletes the installed gateway client private key and local logs. Confirm that required configuration, certificate, and log retention requirements have been satisfied before using it.
+> Purge deletes `gateway.sqlite3`, the YAML rollback mirror, the installed gateway client private key, and local logs. Confirm that required configuration, certificate, and log retention requirements have been satisfied before using it.
 
 Verify that the managed tasks were removed:
 
@@ -1418,7 +1468,8 @@ No matching tasks should remain after a successful uninstall.
 | Follow gateway logs | `Get-Content C:\FBS\fbs-interlock-gateway\logs\gateway.log -Wait` |
 | Follow gateway errors | `Get-Content C:\FBS\fbs-interlock-gateway\logs\gateway-error.log -Wait` |
 | Follow update logs | `Get-Content C:\FBS\fbs-interlock-gateway\logs\update.log -Wait` |
-| Edit config | `Start-Process notepad.exe -ArgumentList "C:\FBS\fbs-interlock-gateway\config.yaml" -Verb RunAs` |
+| Export authoritative config | `& 'C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe' config export -db 'C:\FBS\fbs-interlock-gateway\gateway.sqlite3' -output "$env:TEMP\fbs-interlock-gateway.yaml"` |
+| Import edited config | `& 'C:\FBS\fbs-interlock-gateway\fbs-interlock-gateway.exe' config import -db 'C:\FBS\fbs-interlock-gateway\gateway.sqlite3' -input "$env:TEMP\fbs-interlock-gateway.yaml" -mirror-config 'C:\FBS\fbs-interlock-gateway\config.yaml'` |
 | Standard uninstall | Right-click `uninstall.bat` -> **Run as administrator** |
 | Purge uninstall | `uninstall.bat --purge` |
 
