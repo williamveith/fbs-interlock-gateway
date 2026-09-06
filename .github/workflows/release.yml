@@ -72,7 +72,7 @@ jobs:
       contents: read
       id-token: write
 
-    uses: williamveith/fbs-interlock-gateway-builder/.github/workflows/build-release.yml@77ebf8f3386b18016fccba58fe2e93e69be25f4b
+    uses: williamveith/fbs-interlock-gateway-builder/.github/workflows/build-release.yml@839d0c222fe9ca19cdaef957bb09cfd246b0804a
 
     with:
       version: ${{ inputs.version }}
@@ -149,7 +149,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILDER_SHA: 77ebf8f3386b18016fccba58fe2e93e69be25f4b
+          BUILDER_SHA: 839d0c222fe9ca19cdaef957bb09cfd246b0804a
         run: |
           set -euo pipefail
 

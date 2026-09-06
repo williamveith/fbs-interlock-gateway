@@ -199,8 +199,12 @@ DARWIN_ARM64_ASSET := $(RELEASE_DIR)/$(APP)-darwin-arm64
 DARWIN_AMD64_ASSET := $(RELEASE_DIR)/$(APP)-darwin-amd64
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+COMMIT ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+DATE ?= $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
+
+GO_BUILD_FLAGS := \
+	-trimpath \
+	-buildvcs=false
 
 LDFLAGS := -s -w \
 	-X main.version=$(VERSION) \
@@ -689,7 +693,7 @@ build-darwin-arm64: fmt check-runtime-tls macos-arm64-deployment-guides $(MACOS_
 	cp "$(CONFIGS)" "$(MAC_ARM64_DIR)/"
 	$(call copy_macos_tls,$(MAC_ARM64_TLS_DIR))
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(MAC_ARM64_DIR)/$(APP)" \
 		$(CMD)
@@ -699,7 +703,7 @@ build-darwin-amd64: fmt check-runtime-tls macos-amd64-deployment-guides $(MACOS_
 	cp "$(CONFIGS)" "$(MAC_AMD64_DIR)/"
 	$(call copy_macos_tls,$(MAC_AMD64_TLS_DIR))
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
@@ -709,7 +713,7 @@ build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
@@ -719,7 +723,7 @@ build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
@@ -729,7 +733,7 @@ build-windows-amd64: fmt check-runtime-tls windows-deployment-guides $(WINDOWS_D
 	cp "$(CONFIGS)" "$(WINDOWS_DIR)/"
 	$(copy_windows_tls)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(WINDOWS_DIR)/$(APP).exe" \
 		$(CMD)
@@ -741,7 +745,7 @@ build-windows-amd64: fmt check-runtime-tls windows-deployment-guides $(WINDOWS_D
 release-linux-amd64:
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(LINUX_AMD64_ASSET)" \
 		$(CMD)
@@ -751,7 +755,7 @@ release-linux-amd64:
 release-linux-arm64:
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(LINUX_ARM64_ASSET)" \
 		$(CMD)
@@ -761,7 +765,7 @@ release-linux-arm64:
 release-windows-amd64:
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(WINDOWS_AMD64_ASSET)" \
 		$(CMD)
@@ -771,7 +775,7 @@ release-windows-amd64:
 release-darwin-arm64:
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(DARWIN_ARM64_ASSET)" \
 		$(CMD)
@@ -782,7 +786,7 @@ release-darwin-arm64:
 release-darwin-amd64:
 	mkdir -p "$(RELEASE_DIR)"
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(DARWIN_AMD64_ASSET)" \
 		$(CMD)
@@ -856,27 +860,27 @@ shellcheck:
 build-check:
 	mkdir -p "$(BUILD_DIR)/ci"
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(BUILD_DIR)/ci/$(APP)-linux-amd64" \
 		$(CMD)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(BUILD_DIR)/ci/$(APP)-linux-arm64" \
 		$(CMD)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(BUILD_DIR)/ci/$(APP)-windows-amd64.exe" \
 		$(CMD)
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(BUILD_DIR)/ci/$(APP)-darwin-arm64" \
 		$(CMD)
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
-		-trimpath \
+		$(GO_BUILD_FLAGS) \
 		-ldflags="$(LDFLAGS)" \
 		-o "$(BUILD_DIR)/ci/$(APP)-darwin-amd64" \
 		$(CMD)
