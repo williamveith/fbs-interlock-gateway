@@ -193,10 +193,13 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 
 	if !isLoopbackAdminAddress(s.addr) {
-		log.Printf("warning: admin UI is listening on a non-loopback address: %s", s.addr)
-	} else {
-		log.Printf("admin UI listening on %s", s.addr)
+		return fmt.Errorf(
+			"admin UI must listen on a loopback address, got %q",
+			s.addr,
+		)
 	}
+
+	log.Printf("admin UI listening on %s", s.addr)
 
 	err = server.ListenAndServe()
 	close(serverFinished)
