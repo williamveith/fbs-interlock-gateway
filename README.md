@@ -118,7 +118,7 @@ FBS server
 
 The repository covers the complete interlock system boundary: application behavior, device communication, security, service supervision, deployment, maintenance, physical wiring, enclosure labeling, and auditable device identity.
 
-For installations that require Docker Swarm scheduling, node failover, replicated SQLite recovery, and containerized multi-node deployment, the gateway is also consumed by the separate [`fbs-interlock-gateway-swarm`](https://github.com/williamveith/fbs-interlock-gateway-swarm) repository.
+For installations that require Docker Swarm scheduling, node failover, replicated SQLite recovery, and containerized multi-node deployment, the gateway is also consumed by the separate [`fbs-interlock-gateway-cluster`](https://github.com/williamveith/fbs-interlock-gateway-cluster) repository.
 
 The two repositories have intentionally different responsibilities:
 
@@ -126,7 +126,7 @@ The two repositories have intentionally different responsibilities:
 fbs-interlock-gateway
     -> owns the gateway application and official release binaries
 
-fbs-interlock-gateway-swarm
+fbs-interlock-gateway-cluster
     -> consumes a pinned official gateway release
     -> packages it for Docker Swarm
     -> adds Litestream/R2 persistence and cluster failover infrastructure
@@ -143,7 +143,7 @@ The Swarm repository is not a fork of the gateway application. Gateway behavior,
 | [macOS Installation and Operations Guide](<docs/deployment guides/macOS Install Instructions.md>) | macOS deployment, LaunchDaemons, Application Firewall, Packet Filter, updates, logging, rollback, and uninstall |
 | [Shelly Interlock Hardware Guide](<docs/hardware/Shelly Interlock Hardware Guide.md>) | Junction-box materials, per-assembly bills of materials, wiring configurations, label artwork, QR device identity, fabrication, verification, and maintenance |
 | [Security Policy](SECURITY.md) | Supported versions, private vulnerability reporting, operational-safety limits, secret handling, coordinated disclosure, and safe-harbor expectations |
-| [`fbs-interlock-gateway-swarm`](https://github.com/williamveith/fbs-interlock-gateway-swarm) | Docker Swarm high-availability deployment, container image assembly, Litestream/Cloudflare R2 persistence, Swarm secrets, physical-node networking, uplink failover, container publication, and cluster recovery operations |
+| [`fbs-interlock-gateway-cluster`](https://github.com/williamveith/fbs-interlock-gateway-cluster) | Docker Swarm high-availability deployment, container image assembly, Litestream/Cloudflare R2 persistence, Swarm secrets, physical-node networking, uplink failover, container publication, and cluster recovery operations |
 
 Use this README for gateway application behavior and architecture, including the authoritative SQLite configuration-storage model. Use the platform guides for standalone host installation and operations, the hardware guide for physical interlock construction and audit documentation, and the Swarm repository for multi-node container deployment, failover, replicated recovery, and cluster operations.
 
@@ -319,7 +319,7 @@ Normal FBS traffic updates only the affected tool row in the shared status store
 
 High-availability deployment is maintained separately in:
 
-[`williamveith/fbs-interlock-gateway-swarm`](https://github.com/williamveith/fbs-interlock-gateway-swarm)
+[`williamveith/fbs-interlock-gateway-cluster`](https://github.com/williamveith/fbs-interlock-gateway-cluster)
 
 That repository provides the cluster and container infrastructure around this gateway. It deliberately consumes an official gateway release rather than copying or importing the application implementation.
 
@@ -330,7 +330,7 @@ fbs-interlock-gateway
     |
     | official release binary
     v
-fbs-interlock-gateway-swarm
+fbs-interlock-gateway-cluster
     |
     +-> Docker image
     +-> Docker Swarm service
@@ -345,7 +345,7 @@ This separation keeps the gateway application independently installable on Linux
 
 ## Repository Responsibility Split
 
-| Responsibility | `fbs-interlock-gateway` | `fbs-interlock-gateway-swarm` |
+| Responsibility | `fbs-interlock-gateway` | `fbs-interlock-gateway-cluster` |
 | --- | --- | --- |
 | FBS listener behavior | Authoritative | Consumes |
 | `/status`, `/on`, `/off` handling | Authoritative | Consumes |
@@ -474,7 +474,7 @@ A gateway update therefore follows this trust boundary:
 ```text
 1. change and validate fbs-interlock-gateway
 2. publish a new official gateway release
-3. update the pinned gateway dependency in fbs-interlock-gateway-swarm
+3. update the pinned gateway dependency in fbs-interlock-gateway-cluster
 4. validate the Swarm/container integration
 5. publish a new Swarm release
 ```
@@ -490,7 +490,7 @@ Use the standalone deployment documented in this repository when:
 - the Linux, Windows, or macOS installers/updaters are being used
 - Docker Swarm failover is not required
 
-Use `fbs-interlock-gateway-swarm` when:
+Use `fbs-interlock-gateway-cluster` when:
 
 - the production gateway should run as a Linux container
 - Docker Swarm should reschedule the gateway after a node failure
@@ -2409,7 +2409,7 @@ Committed security material is limited to non-secret trust/configuration source 
 
 `SECURITY.md` directs vulnerability reports to GitHub Private Vulnerability Reporting and defines operational-safety restrictions for testing against a system that can affect physical interlocks.
 
-Cluster-only configuration, Docker Swarm state, Litestream/R2 deployment settings, and physical-node failover tooling belong in `fbs-interlock-gateway-swarm`; they should not be copied into this application repository merely to support the Swarm deployment.
+Cluster-only configuration, Docker Swarm state, Litestream/R2 deployment settings, and physical-node failover tooling belong in `fbs-interlock-gateway-cluster`; they should not be copied into this application repository merely to support the Swarm deployment.
 
 # License
 
