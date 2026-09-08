@@ -22,6 +22,12 @@ lang: en-US
   - [Platform Firewall Behavior](#platform-firewall-behavior)
   - [Release and Update Trust](#release-and-update-trust)
 - [System Architecture](#system-architecture)
+- [High-Availability Swarm Deployment](#high-availability-swarm-deployment)
+  - [Repository Responsibility Split](#repository-responsibility-split)
+  - [Swarm Runtime Model](#swarm-runtime-model)
+  - [Persistent-State and Recovery Model](#persistent-state-and-recovery-model)
+  - [Container Publication and Supply-Chain Relationship](#container-publication-and-supply-chain-relationship)
+  - [Choosing a Deployment Model](#choosing-a-deployment-model)
 - [Interlock Hardware](#interlock-hardware)
 - [Repository Layout](#repository-layout)
 - [FBS-Facing Behavior](#fbs-facing-behavior)
@@ -112,6 +118,22 @@ FBS server
 
 The repository covers the complete interlock system boundary: application behavior, device communication, security, service supervision, deployment, maintenance, physical wiring, enclosure labeling, and auditable device identity.
 
+For installations that require Docker Swarm scheduling, node failover, replicated SQLite recovery, and containerized multi-node deployment, the gateway is also consumed by the separate [`fbs-interlock-gateway-swarm`](https://github.com/williamveith/fbs-interlock-gateway-swarm) repository.
+
+The two repositories have intentionally different responsibilities:
+
+```text
+fbs-interlock-gateway
+    -> owns the gateway application and official release binaries
+
+fbs-interlock-gateway-swarm
+    -> consumes a pinned official gateway release
+    -> packages it for Docker Swarm
+    -> adds Litestream/R2 persistence and cluster failover infrastructure
+```
+
+The Swarm repository is not a fork of the gateway application. Gateway behavior, protocol handling, Shelly communication, configuration storage, Admin behavior, and application-level security remain authoritative in this repository.
+
 ## Documentation Set
 
 | Document | Scope |
@@ -121,8 +143,9 @@ The repository covers the complete interlock system boundary: application behavi
 | [macOS Installation and Operations Guide](<docs/deployment guides/macOS Install Instructions.md>) | macOS deployment, LaunchDaemons, Application Firewall, Packet Filter, updates, logging, rollback, and uninstall |
 | [Shelly Interlock Hardware Guide](<docs/hardware/Shelly Interlock Hardware Guide.md>) | Junction-box materials, per-assembly bills of materials, wiring configurations, label artwork, QR device identity, fabrication, verification, and maintenance |
 | [Security Policy](SECURITY.md) | Supported versions, private vulnerability reporting, operational-safety limits, secret handling, coordinated disclosure, and safe-harbor expectations |
+| [`fbs-interlock-gateway-swarm`](https://github.com/williamveith/fbs-interlock-gateway-swarm) | Docker Swarm high-availability deployment, container image assembly, Litestream/Cloudflare R2 persistence, Swarm secrets, physical-node networking, uplink failover, container publication, and cluster recovery operations |
 
-Use this README for project-wide behavior and architecture, including the authoritative SQLite configuration-storage model. Use the platform guides for installation and operations, and use the hardware guide for physical interlock construction and audit documentation.
+Use this README for gateway application behavior and architecture, including the authoritative SQLite configuration-storage model. Use the platform guides for standalone host installation and operations, the hardware guide for physical interlock construction and audit documentation, and the Swarm repository for multi-node container deployment, failover, replicated recovery, and cluster operations.
 
 # Capabilities
 
@@ -168,6 +191,7 @@ Use this README for project-wide behavior and architecture, including the author
 - GPG-signed annotated release tags
 - immutable GitHub Releases with release/asset attestation verification
 - a unified `make verify` validation gate
+- a separately maintained Docker Swarm deployment repository that consumes official gateway releases without duplicating the gateway application source
 
 # Safety and Security Model
 
@@ -290,6 +314,192 @@ The repository's [Security Policy](SECURITY.md) defines vulnerability-reporting,
 ```
 
 Normal FBS traffic updates only the affected tool row in the shared status store. The browser reads that in-memory snapshot every three seconds without contacting any Shelly. The **Refresh Status** action explicitly runs a fleet-wide `Switch.GetStatus` scan with up to 32 workers and publishes each completed result immediately. FBS requests have priority over Admin probes for the same device.
+
+# High-Availability Swarm Deployment
+
+High-availability deployment is maintained separately in:
+
+[`williamveith/fbs-interlock-gateway-swarm`](https://github.com/williamveith/fbs-interlock-gateway-swarm)
+
+That repository provides the cluster and container infrastructure around this gateway. It deliberately consumes an official gateway release rather than copying or importing the application implementation.
+
+The dependency direction is:
+
+```text
+fbs-interlock-gateway
+    |
+    | official release binary
+    v
+fbs-interlock-gateway-swarm
+    |
+    +-> Docker image
+    +-> Docker Swarm service
+    +-> Litestream
+    +-> Cloudflare R2
+    +-> Docker Secrets
+    +-> physical-node networking
+    +-> uplink/failover controller
+```
+
+This separation keeps the gateway application independently installable on Linux, Windows, and macOS while allowing the production Linux deployment to use a dedicated Swarm architecture without coupling cluster-specific code to the application.
+
+## Repository Responsibility Split
+
+| Responsibility | `fbs-interlock-gateway` | `fbs-interlock-gateway-swarm` |
+| --- | --- | --- |
+| FBS listener behavior | Authoritative | Consumes |
+| `/status`, `/on`, `/off` handling | Authoritative | Consumes |
+| Shelly HTTP/HTTPS RPC | Authoritative | Consumes |
+| Digest Authentication | Authoritative | Consumes |
+| Shelly mutual TLS | Authoritative | Consumes runtime TLS material |
+| Admin UI/API | Authoritative | Runs the packaged gateway |
+| SQLite schema and migrations | Authoritative | Persists/replicates the database |
+| Gateway release binaries | Builds and publishes | Pins and consumes |
+| Standalone platform installers | Authoritative | Not responsible |
+| Docker image assembly | Not responsible | Authoritative |
+| Docker Swarm service | Not responsible | Authoritative |
+| Litestream configuration | Not responsible | Authoritative |
+| Cloudflare R2 replication/recovery | Not responsible | Authoritative |
+| Swarm Docker Secrets | Not responsible | Authoritative |
+| Physical-node private networking | Not responsible | Authoritative |
+| Shared uplink/failover control | Not responsible | Authoritative |
+| Container registry publication | Not responsible | Authoritative |
+
+Application changes belong here first. Cluster-specific deployment changes belong in the Swarm repository.
+
+## Swarm Runtime Model
+
+The Swarm deployment is designed around one active gateway task rather than active-active gateway application replicas.
+
+Conceptually:
+
+```text
+                         Docker Swarm
+                +-------------------------+
+FBS ----------> | active gateway task     |
+                |                         |
+                | swarm entrypoint        |
+                |       |                 |
+                |       v                 |
+                |   Litestream            |
+                |       |                 |
+                |       v                 |
+                | fbs-interlock-gateway   |
+                +-----------|-------------+
+                            |
+                            +------> Shelly interlocks
+                            |
+                            v
+                  local gateway SQLite DB
+                            |
+                            v
+                       Litestream
+                            |
+                            v
+                      Cloudflare R2
+```
+
+Docker Swarm owns service scheduling and task replacement. The gateway executable itself remains unaware of Swarm and continues to operate against its normal configuration/database paths.
+
+The Swarm repository also contains host-level tooling for the physical Linux nodes, including private Swarm networking and coordinated external-uplink failover. Those mechanisms are deployment infrastructure and are intentionally kept outside this application repository.
+
+## Persistent-State and Recovery Model
+
+The gateway's SQLite database remains the authoritative application configuration store. The Swarm deployment does **not** turn SQLite into a shared network database and does not place the active database on NFS or SMB.
+
+Instead:
+
+```text
+gateway
+   |
+   v
+node-local SQLite database
+   |
+   v
+Litestream replication
+   |
+   v
+Cloudflare R2
+```
+
+If Swarm moves the gateway task to an eligible node whose local data volume does not contain the database, Litestream can restore the replicated database before normal gateway operation according to the Swarm repository's current configuration.
+
+This preserves the standalone gateway's local-SQLite model while adding an external recovery path suitable for node replacement and failover.
+
+The Swarm repository owns the exact:
+
+- Docker volume configuration
+- Litestream database path and restore behavior
+- R2 bucket/path/endpoint settings
+- Swarm secret names and mounts
+- service replica count
+- restart/update/rollback policy
+- published ports
+- node eligibility and host-network configuration
+
+Do not duplicate those live values in this README; consult the Swarm repository for the current deployment definition.
+
+## Container Publication and Supply-Chain Relationship
+
+The Swarm release process consumes a pinned official release from this repository.
+
+Conceptually:
+
+```text
+gateway source
+    |
+    v
+validated gateway release
+    |
+    v
+signed / immutable gateway publication
+    |
+    v
+Swarm image build pins that release
+    |
+    v
+multi-platform Linux OCI image
+    |
+    +-> Docker Hub
+    |
+    +-> GitHub Container Registry
+```
+
+The Swarm build verifies the selected gateway release asset before including it in the container. The resulting container release has its own image provenance, SBOM, signed Git release metadata, and registry identity.
+
+Docker Hub and GitHub Container Registry publication are cluster-release concerns. The standalone gateway continues to publish native application release binaries for its supported operating systems.
+
+A gateway update therefore follows this trust boundary:
+
+```text
+1. change and validate fbs-interlock-gateway
+2. publish a new official gateway release
+3. update the pinned gateway dependency in fbs-interlock-gateway-swarm
+4. validate the Swarm/container integration
+5. publish a new Swarm release
+```
+
+A published Swarm release should remain tied to the gateway release it was built from rather than silently replacing the embedded gateway under an existing cluster release.
+
+## Choosing a Deployment Model
+
+Use the standalone deployment documented in this repository when:
+
+- the gateway runs directly under the host operating system
+- platform-native service supervision is desired
+- the Linux, Windows, or macOS installers/updaters are being used
+- Docker Swarm failover is not required
+
+Use `fbs-interlock-gateway-swarm` when:
+
+- the production gateway should run as a Linux container
+- Docker Swarm should reschedule the gateway after a node failure
+- the SQLite database should be replicated to Cloudflare R2
+- an empty replacement node should be able to recover gateway state
+- physical-node private networking and shared-uplink failover are required
+- container SBOM/provenance and multi-registry publication are part of the deployment model
+
+The application protocol and configuration semantics are the same gateway in either model. The difference is the deployment, persistence, and failover layer around it.
 
 # Interlock Hardware
 
@@ -866,7 +1076,7 @@ The SQLite connection is intentionally conservative:
 - `PRAGMA quick_check(1)` on open
 - schema versioning through `PRAGMA user_version`
 
-The database must be local to the gateway host. Do not place `gateway.sqlite3` on NFS, SMB, or another network filesystem for active/passive sharing. Replicate configuration between gateway hosts explicitly instead.
+The database must be local to the gateway host. Do not place `gateway.sqlite3` on NFS, SMB, or another network filesystem for active/passive sharing. Standalone multi-host designs must replicate state explicitly. The separate Swarm deployment keeps the active SQLite database node-local and uses Litestream with Cloudflare R2 for replicated recovery rather than sharing the live database file.
 
 ## First-run migration
 
@@ -1409,6 +1619,8 @@ A published production release contains the five executables, five checksum file
 ```
 
 The signature is a raw Ed25519 detached signature over the exact bytes of the corresponding `.sha256` file. Updaters authenticate the checksum with the public key embedded in the currently installed gateway before the checksum is used to authorize a candidate binary.
+
+The Swarm repository consumes these official Linux release assets as an upstream dependency. Its container build and release process are separate from this native-binary publication process; a new gateway release is incorporated into Swarm only when the pinned gateway dependency in the Swarm repository is intentionally advanced and a new Swarm release is published.
 
 Display embedded metadata:
 
@@ -2196,6 +2408,8 @@ There is no repository-root generated `tls/` staging directory. Platform deploym
 Committed security material is limited to non-secret trust/configuration source such as certificate templates and `internal/updateauth/update-signing-public.pem`. The Ed25519 update-signing **private** key, GPG private key, CA private keys, production configuration/database state, active credentials, generated certificates/CSRs, and production mappings must remain outside version control.
 
 `SECURITY.md` directs vulnerability reports to GitHub Private Vulnerability Reporting and defines operational-safety restrictions for testing against a system that can affect physical interlocks.
+
+Cluster-only configuration, Docker Swarm state, Litestream/R2 deployment settings, and physical-node failover tooling belong in `fbs-interlock-gateway-swarm`; they should not be copied into this application repository merely to support the Swarm deployment.
 
 # License
 

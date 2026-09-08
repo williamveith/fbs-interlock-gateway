@@ -132,6 +132,12 @@ func New(
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if !isLoopbackAdminAddress(s.addr) {
+		return fmt.Errorf(
+			"admin UI must listen on a loopback address, got %q",
+			s.addr,
+		)
+	}
 
 	webRoot, err := fs.Sub(embeddedWeb, "web")
 	if err != nil {
@@ -150,8 +156,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	var handler http.Handler = mux
 
-	handler = s.securityHeadersMiddleware(handler)
 	handler = s.crossSiteProtectionMiddleware(handler)
+	handler = hostValidationMiddleware(handler)
+	handler = s.securityHeadersMiddleware(handler)
 
 	server := &http.Server{
 		Addr:              s.addr,
@@ -192,11 +199,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	if !isLoopbackAdminAddress(s.addr) {
-		log.Printf("warning: admin UI is listening on a non-loopback address: %s", s.addr)
-	} else {
-		log.Printf("admin UI listening on %s", s.addr)
-	}
+	log.Printf("admin UI listening on %s", s.addr)
 
 	err = server.ListenAndServe()
 	close(serverFinished)
@@ -371,10 +374,6 @@ func requestedPassword(
 		return cloneTrimmedStringPointer(incoming.Password)
 	}
 
-	if password, ok := passwordsByPort[incoming.Port]; ok {
-		return cloneStringPointer(password)
-	}
-
 	normalizedName := normalizeToolName(
 		incoming.InterlockName,
 	)
@@ -383,6 +382,10 @@ func requestedPassword(
 		if password, ok := passwordsByName[normalizedName]; ok {
 			return cloneStringPointer(password)
 		}
+	}
+
+	if password, ok := passwordsByPort[incoming.Port]; ok {
+		return cloneStringPointer(password)
 	}
 
 	return nil
@@ -737,6 +740,29 @@ func setAPINoStoreHeaders(w http.ResponseWriter) {
 		"no-store, max-age=0",
 	)
 	w.Header().Set("Pragma", "no-cache")
+}
+
+func hostValidationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			host := strings.ToLower(
+				strings.TrimSpace(r.Host),
+			)
+
+			switch host {
+			case "127.0.0.1:18090",
+				"localhost:18090":
+				next.ServeHTTP(w, r)
+
+			default:
+				http.Error(
+					w,
+					"invalid host",
+					http.StatusForbidden,
+				)
+			}
+		},
+	)
 }
 
 func (s *Server) crossSiteProtectionMiddleware(

@@ -59,7 +59,7 @@ func runGateway(args []string) error {
 	dbPath := flags.String("db", "", "path to authoritative SQLite configuration database")
 	configPath := flags.String("config", defaults.yaml, "legacy config.yaml import path and generated rollback mirror")
 	showVersion := flags.Bool("version", false, "print version and exit")
-	adminAddr := flags.String("admin", "127.0.0.1:18090", "admin UI listen address; empty disables admin UI")
+	const adminAddr = "127.0.0.1:18090"
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func runGateway(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	app := gateway.NewWithStore(cfg, store, *adminAddr)
+	app := gateway.NewWithStore(cfg, store, adminAddr)
 	return app.Run(ctx)
 }
 
