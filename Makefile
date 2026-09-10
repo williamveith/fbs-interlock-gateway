@@ -888,7 +888,7 @@ build-check:
 		$(CMD)
 
 govulncheck:
-	govulncheck ./...
+	go tool govulncheck ./...
 
 fuzz:
 	go test ./internal/fbs -run='^$$' -fuzz=FuzzFBSRequestHandling -fuzztime=180s -fuzzminimizetime=0
