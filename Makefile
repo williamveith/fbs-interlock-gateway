@@ -227,6 +227,7 @@ endif
 	vet \
 	staticcheck \
 	govulncheck \
+	fuzz \
 	test \
 	test-race \
 	scripts-check \
@@ -888,6 +889,14 @@ build-check:
 
 govulncheck:
 	govulncheck ./...
+
+fuzz:
+	go test ./internal/fbs -run='^$$' -fuzz=FuzzFBSRequestHandling -fuzztime=180s -fuzzminimizetime=0
+	go test ./internal/shelly -run='^$$' -fuzz=FuzzDigestChallenge -fuzztime=180s -fuzzminimizetime=0
+	go test ./internal/updateauth -run='^$$' -fuzz=FuzzParseSignedChecksum -fuzztime=180s -fuzzminimizetime=0
+	go test ./internal/admin -run='^$$' -fuzz=FuzzAdminConfigPut -fuzztime=180s -fuzzminimizetime=0
+	go test ./internal/admin -run='^$$' -fuzz=FuzzAdminPasswordSemantics -fuzztime=180s -fuzzminimizetime=0
+	go test ./internal/admin -run='^$$' -fuzz=FuzzAdminRequestProtection -fuzztime=180s -fuzzminimizetime=0
 
 verify: fmt-check tidy-check vet staticcheck test-race scripts-check shellcheck build-check govulncheck
 
