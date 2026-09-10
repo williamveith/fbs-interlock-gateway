@@ -226,6 +226,7 @@ endif
 	tidy-check \
 	vet \
 	staticcheck \
+	govulncheck \
 	test \
 	test-race \
 	scripts-check \
@@ -885,7 +886,10 @@ build-check:
 		-o "$(BUILD_DIR)/ci/$(APP)-darwin-amd64" \
 		$(CMD)
 
-verify: fmt-check tidy-check vet staticcheck test-race scripts-check shellcheck build-check
+govulncheck:
+	govulncheck ./...
+
+verify: fmt-check tidy-check vet staticcheck test-race scripts-check shellcheck build-check govulncheck
 
 release: \
 	verify \
