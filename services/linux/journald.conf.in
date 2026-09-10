@@ -1,0 +1,26 @@
+[Journal]
+
+# Keep gateway logs across reboots.
+Storage=persistent
+
+# Compress archived journal data.
+Compress=yes
+
+# Maximum disk space this application's journal may consume.
+SystemMaxUse=1G
+
+# Preserve at least this much free disk space.
+SystemKeepFree=2G
+
+# Keep individual journal files reasonably small for efficient rotation.
+SystemMaxFileSize=64M
+
+# Rotate active journal files at least once per day.
+MaxFileSec=1day
+
+# Retain logs for up to 30 days, subject to disk-space limits.
+MaxRetentionSec=30day
+
+# Additional protection against runaway logging.
+RateLimitIntervalSec=30s
+RateLimitBurst=1000

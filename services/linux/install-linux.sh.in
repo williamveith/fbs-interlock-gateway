@@ -33,6 +33,11 @@ SERVICE_SRC="${SOURCE_DIR}/${SERVICE_NAME}"
 UNINSTALL_SRC="${SOURCE_DIR}/uninstall.sh"
 UPDATE_SRC="${SOURCE_DIR}/update.sh"
 
+JOURNAL_NAMESPACE="${APP}"
+JOURNALD_CONFIG_SRC="${SOURCE_DIR}/journald.conf"
+JOURNALD_CONFIG_PATH="/etc/systemd/journald@${JOURNAL_NAMESPACE}.conf"
+JOURNALD_SERVICE_NAME="systemd-journald@${JOURNAL_NAMESPACE}.service"
+
 TLS_SRC="${SOURCE_DIR}/tls"
 SERVER_CA_SRC="${TLS_SRC}/server-ca.crt"
 CLIENT_CERT_SRC="${TLS_SRC}/gateway-client.crt"
@@ -326,6 +331,7 @@ MAIN_WAS_ENABLED=false
 MAIN_WAS_ACTIVE=false
 UPDATE_TIMER_WAS_ENABLED=false
 UPDATE_TIMER_WAS_ACTIVE=false
+JOURNALD_WAS_ACTIVE=false
 ROLLBACK_ACTIVE=false
 
 cleanup() {
@@ -389,6 +395,7 @@ rollback_install() {
 
   restore_path "$INSTALL_DIR" "install-dir"
   restore_path "$SERVICE_PATH" "main-service"
+  restore_path "$JOURNALD_CONFIG_PATH" "journald-config"
   restore_path "$UPDATE_SERVICE_PATH" "update-service"
   restore_path "$UPDATE_TIMER_PATH" "update-timer"
 
@@ -396,12 +403,20 @@ rollback_install() {
   restore_path "$DB_PATH" "gateway-db"
 
   systemctl daemon-reload >/dev/null 2>&1 || true
+
+  if [[ "$JOURNALD_WAS_ACTIVE" == true ]]; then
+    systemctl restart "$JOURNALD_SERVICE_NAME" >/dev/null 2>&1 || true
+  else
+    systemctl stop "$JOURNALD_SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+
   restore_unit_state "$SERVICE_NAME" "$MAIN_WAS_ENABLED" "$MAIN_WAS_ACTIVE"
   restore_unit_state "$UPDATE_TIMER_NAME" "$UPDATE_TIMER_WAS_ENABLED" "$UPDATE_TIMER_WAS_ACTIVE"
   systemctl reset-failed \
     "$SERVICE_NAME" \
     "$UPDATE_SERVICE_NAME" \
     "$UPDATE_TIMER_NAME" \
+    "$JOURNALD_SERVICE_NAME" \
     >/dev/null 2>&1 || true
   set -e
 }
@@ -412,6 +427,7 @@ configure_ufw
 require_file "$BIN_SRC" "application binary"
 require_file "$CONFIG_SRC" "config file"
 require_file "$SERVICE_SRC" "systemd service file"
+require_file "$JOURNALD_CONFIG_SRC" "journald namespace configuration"
 require_file "$UNINSTALL_SRC" "uninstaller"
 require_file "$SERVER_CA_SRC" "Shelly server CA certificate"
 require_file "$CLIENT_CERT_SRC" "gateway client certificate"
@@ -454,6 +470,9 @@ fi
 if unit_active "$UPDATE_TIMER_NAME"; then
   UPDATE_TIMER_WAS_ACTIVE=true
 fi
+if unit_active "$JOURNALD_SERVICE_NAME"; then
+  JOURNALD_WAS_ACTIVE=true
+fi
 
 echo "Stopping existing systemd units..."
 stop_unit "$UPDATE_TIMER_NAME"
@@ -462,6 +481,7 @@ stop_unit "$SERVICE_NAME"
 
 backup_path "$INSTALL_DIR" "install-dir"
 backup_path "$SERVICE_PATH" "main-service"
+backup_path "$JOURNALD_CONFIG_PATH" "journald-config"
 backup_path "$UPDATE_SERVICE_PATH" "update-service"
 backup_path "$UPDATE_TIMER_PATH" "update-timer"
 backup_path "$DB_PATH" "gateway-db"
@@ -607,6 +627,14 @@ if ! verify_database_directory_access; then
   exit 1
 fi
 
+echo "Installing journald namespace configuration..."
+install \
+  -o root \
+  -g root \
+  -m 0644 \
+  "$JOURNALD_CONFIG_SRC" \
+  "$JOURNALD_CONFIG_PATH"
+
 echo "Installing systemd service..."
 install \
   -o root \
@@ -636,12 +664,28 @@ fi
 echo "Reloading systemd..."
 systemctl daemon-reload
 
+echo "Applying journald namespace configuration..."
+if ! systemctl try-restart "$JOURNALD_SERVICE_NAME"; then
+  echo "ERROR: Journald namespace configuration could not be applied:"
+  echo "  ${JOURNALD_CONFIG_PATH}"
+  rollback_install
+  exit 1
+fi
+
 echo "Enabling gateway service..."
 systemctl enable "$SERVICE_NAME"
 
 echo "Starting gateway service..."
 if ! systemctl restart "$SERVICE_NAME"; then
   echo "ERROR: Gateway service could not be started."
+  systemctl --no-pager --full status "$SERVICE_NAME" || true
+  systemctl --no-pager --full status "$JOURNALD_SERVICE_NAME" || true
+  journalctl \
+    --namespace="$JOURNAL_NAMESPACE" \
+    -u "$SERVICE_NAME" \
+    -n 100 \
+    --no-pager \
+    || true
   rollback_install
   exit 1
 fi
@@ -649,7 +693,41 @@ fi
 if ! wait_for_admin; then
   echo "ERROR: The Admin API did not become ready."
   systemctl --no-pager --full status "$SERVICE_NAME" || true
-  journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+
+  journalctl \
+    --namespace="$JOURNAL_NAMESPACE" \
+    -u "$SERVICE_NAME" \
+    -n 100 \
+    --no-pager \
+    || true
+
+  rollback_install
+  exit 1
+fi
+
+echo "Verifying gateway journal namespace..."
+
+if ! systemctl is-active --quiet "$JOURNALD_SERVICE_NAME"; then
+  echo "ERROR: Gateway journal namespace is not active:"
+  echo "  ${JOURNALD_SERVICE_NAME}"
+  rollback_install
+  exit 1
+fi
+
+if ! journalctl --namespace="$JOURNAL_NAMESPACE" --flush; then
+  echo "ERROR: Gateway journal could not be flushed to persistent storage:"
+  echo "  ${JOURNAL_NAMESPACE}"
+  rollback_install
+  exit 1
+fi
+
+if ! journalctl \
+  --namespace="$JOURNAL_NAMESPACE" \
+  --disk-usage \
+  --no-pager
+then
+  echo "ERROR: Unable to access gateway journal namespace:"
+  echo "  ${JOURNAL_NAMESPACE}"
   rollback_install
   exit 1
 fi
@@ -679,6 +757,17 @@ systemctl --no-pager --full status "$SERVICE_NAME" || true
 echo
 echo "Admin API is responding at:"
 echo "  ${ADMIN_STATUS_URL}"
+echo
+echo "Gateway journal namespace:"
+echo "  ${JOURNAL_NAMESPACE}"
+echo "Gateway journal configuration:"
+echo "  ${JOURNALD_CONFIG_PATH}"
+echo "Gateway journal disk usage:"
+journalctl \
+  --namespace="$JOURNAL_NAMESPACE" \
+  --disk-usage \
+  --no-pager \
+  || true
 echo
 echo "Authoritative SQLite configuration:"
 echo "  ${DB_PATH}"
