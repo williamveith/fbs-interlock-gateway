@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,6 +37,7 @@ const (
 	idleTimeout       = 30 * time.Second
 	shutdownTimeout   = 3 * time.Second
 	restartDelay      = 500 * time.Millisecond
+	logExportTimeout  = 5 * time.Minute
 )
 
 type ConfigStore interface {
@@ -51,12 +53,18 @@ type StatusClient interface {
 	) (shelly.SwitchStatus, error)
 }
 
+type LogExporter interface {
+	Export(ctx context.Context, dst io.Writer) error
+	ExportFilename(now time.Time) string
+}
+
 type Server struct {
 	addr             string
 	store            ConfigStore
 	statusClient     StatusClient
 	statusStore      *status.Store
 	restartRequested chan<- struct{}
+	logExporter      LogExporter
 
 	statusMu              sync.Mutex
 	statusRefreshInFlight bool
@@ -131,6 +139,10 @@ func New(
 	}
 }
 
+func (s *Server) SetLogExporter(exporter LogExporter) {
+	s.logExporter = exporter
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	if !isLoopbackAdminAddress(s.addr) {
 		return fmt.Errorf(
@@ -151,6 +163,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/logs/export", s.handleLogExport)
 	mux.HandleFunc("/api/restart", s.handleRestart)
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
@@ -620,6 +633,76 @@ func adminToolStatus(tool config.Tool) ToolStatus {
 		SwitchID:      tool.SwitchID,
 		Enabled:       tool.Enabled,
 	}
+}
+
+func (s *Server) handleLogExport(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	setAPINoStoreHeaders(w)
+
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(
+			w,
+			"method not allowed",
+			http.StatusMethodNotAllowed,
+		)
+		return
+	}
+
+	if s.logExporter == nil {
+		http.Error(
+			w,
+			"application log export is unavailable",
+			http.StatusServiceUnavailable,
+		)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(
+		r.Context(),
+		logExportTimeout,
+	)
+	defer cancel()
+
+	filename := strings.TrimSpace(
+		s.logExporter.ExportFilename(time.Now()),
+	)
+	if filename == "" {
+		filename = "logs.log"
+	}
+
+	disposition := mime.FormatMediaType(
+		"attachment",
+		map[string]string{"filename": filename},
+	)
+
+	w.Header().Set(
+		"Content-Type",
+		"text/plain; charset=utf-8",
+	)
+	w.Header().Set("Content-Disposition", disposition)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	controller := http.NewResponseController(w)
+	deadline := time.Now().Add(logExportTimeout)
+	if err := controller.SetWriteDeadline(deadline); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		log.Printf(
+			"admin log export could not extend write deadline: %v",
+			err,
+		)
+	}
+
+	log.Printf("admin log export started")
+
+	if err := s.logExporter.Export(ctx, w); err != nil {
+		log.Printf("admin log export failed: %v", err)
+		return
+	}
+
+	log.Printf("admin log export completed")
 }
 
 func (s *Server) handleRestart(

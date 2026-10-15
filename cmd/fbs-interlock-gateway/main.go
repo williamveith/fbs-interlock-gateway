@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/williamveith/fbs-interlock-gateway/internal/applog"
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
 	"github.com/williamveith/fbs-interlock-gateway/internal/configstore"
 	"github.com/williamveith/fbs-interlock-gateway/internal/gateway"
@@ -49,7 +51,7 @@ func main() {
 	}
 }
 
-func runGateway(args []string) error {
+func runGateway(args []string) (runErr error) {
 	defaults, err := defaultPaths()
 	if err != nil {
 		return err
@@ -70,6 +72,33 @@ func runGateway(args []string) error {
 	}
 
 	resolvedDBPath := resolveRuntimeDBPath(*dbPath, *configPath)
+
+	logStore, err := applog.Open(
+		filepath.Join(filepath.Dir(resolvedDBPath), "logs"),
+		applog.DefaultOptions(),
+	)
+	if err != nil {
+		log.Printf("warning: portable log archive disabled: %v", err)
+	} else {
+		previousLogWriter := log.Writer()
+		log.SetOutput(io.MultiWriter(previousLogWriter, logStore))
+
+		defer func() {
+			if runErr != nil {
+				log.Printf("gateway exiting with error: %v", runErr)
+			}
+
+			log.SetOutput(previousLogWriter)
+			if closeErr := logStore.Close(); closeErr != nil {
+				fmt.Fprintf(
+					os.Stderr,
+					"WARNING: close portable log archive: %v\n",
+					closeErr,
+				)
+			}
+		}()
+	}
+
 	store, err := configstore.Open(resolvedDBPath, configstore.Options{MirrorPath: *configPath})
 	if err != nil {
 		return fmt.Errorf("open configuration database %q: %w", resolvedDBPath, err)
@@ -97,6 +126,10 @@ func runGateway(args []string) error {
 	defer stop()
 
 	app := gateway.NewWithStore(cfg, store, adminAddr)
+	if logStore != nil {
+		app.SetLogExporter(logStore)
+	}
+
 	return app.Run(ctx)
 }
 

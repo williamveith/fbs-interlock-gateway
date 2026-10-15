@@ -87,7 +87,14 @@ h2 {
 }
 
 .config-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     margin-top: 1rem;
+}
+
+.config-actions form {
+    margin: 0;
 }
 
 table {

@@ -92,6 +92,9 @@ UPDATE_TIMER_TEMPLATE := $(SERVICE_DIR_LINUX)/update.timer.in
 UPDATE_SERVICE_OUT := $(LINUX_DIR)/$(APP)-update.service
 UPDATE_TIMER_OUT := $(LINUX_DIR)/$(APP)-update.timer
 
+JOURNALD_CONFIG_TEMPLATE := $(SERVICE_DIR_LINUX)/journald.conf.in
+JOURNALD_CONFIG_OUT := $(LINUX_DIR)/journald.conf
+
 # =========================
 # WINDOWS SERVICE CONFIGS
 # =========================
@@ -368,6 +371,12 @@ $(UPDATE_TIMER_OUT): $(UPDATE_TIMER_TEMPLATE) Makefile
 		-e 's|@SERVICE_USER@|$(SERVICE_USER)|g' \
 		-e 's|@SERVICE_GROUP@|$(SERVICE_GROUP)|g' \
 		"$(UPDATE_TIMER_TEMPLATE)" > "$@"
+
+$(JOURNALD_CONFIG_OUT): $(JOURNALD_CONFIG_TEMPLATE) Makefile
+	mkdir -p "$(LINUX_DIR)"
+	install -m 0644 \
+		"$(JOURNALD_CONFIG_TEMPLATE)" \
+		"$@"
 
 $(WINDOWS_START_OUT): $(WINDOWS_START_TEMPLATE) Makefile
 	mkdir -p "$(WINDOWS_DIR)"
@@ -710,7 +719,7 @@ build-darwin-amd64: fmt check-runtime-tls macos-amd64-deployment-guides $(MACOS_
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT) $(JOURNALD_CONFIG_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
@@ -720,7 +729,7 @@ build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT)
+build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT) $(JOURNALD_CONFIG_OUT)
 	mkdir -p "$(LINUX_DIR)"
 	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
