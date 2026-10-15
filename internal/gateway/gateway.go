@@ -36,6 +36,8 @@ type Gateway struct {
 
 	adminAddr string
 
+	logExporter admin.LogExporter
+
 	safeOutput bool
 
 	shelly *shelly.Client
@@ -78,12 +80,21 @@ func NewWithStore(
 	}
 }
 
+func (g *Gateway) SetLogExporter(exporter admin.LogExporter) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.logExporter = exporter
+}
+
 func (g *Gateway) Run(ctx context.Context) error {
 	g.mu.RLock()
 
 	cfg := g.cfg
 
 	adminAddr := g.adminAddr
+
+	logExporter := g.logExporter
 
 	initErr := g.initErr
 
@@ -108,6 +119,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 
 	if adminAddr != "" {
 		adminServer := admin.New(adminAddr, g, g.shelly, g.statusStore, restartRequested)
+		adminServer.SetLogExporter(logExporter)
 
 		wg.Add(1)
 
