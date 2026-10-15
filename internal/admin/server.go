@@ -936,7 +936,7 @@ func (s *Server) securityHeadersMiddleware(
 			)
 			w.Header().Set(
 				"Referrer-Policy",
-				"no-referrer",
+				"same-origin",
 			)
 			w.Header().Set(
 				"Permissions-Policy",
