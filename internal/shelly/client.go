@@ -48,6 +48,8 @@ type Client struct {
 	authByIP                    map[string]*deviceAuthState
 	authenticationThrottleDelay time.Duration
 
+	serverCertificates sync.Map
+
 	recoveryMu     sync.Mutex
 	recoveryByIP   map[string]recoveryState
 	rebootCooldown time.Duration
@@ -713,7 +715,49 @@ func (c *Client) sendGET(
 		return nil, timing.wrapError(req.URL.Host, err)
 	}
 
+	if resp.TLS != nil &&
+		len(resp.TLS.PeerCertificates) > 0 &&
+		resp.Request != nil &&
+		resp.Request.URL.Scheme == "https" &&
+		resp.Request.URL.Host == req.URL.Host {
+
+		cert := resp.TLS.PeerCertificates[0]
+
+		previous, ok := c.serverCertificates.Load(req.URL.Host)
+
+		if !ok || !previous.(*x509.Certificate).Equal(cert) {
+			c.serverCertificates.Store(req.URL.Host, cert)
+		}
+	}
+
 	return resp, nil
+}
+
+type ServerCertificateInfo struct {
+	Subject      string    `json:"subject"`
+	Issuer       string    `json:"issuer"`
+	SerialNumber string    `json:"serial_number"`
+	NotBefore    time.Time `json:"not_before"`
+	NotAfter     time.Time `json:"not_after"`
+}
+
+func (c *Client) GetServerCertificate(
+	host string,
+) (ServerCertificateInfo, bool) {
+	value, ok := c.serverCertificates.Load(host)
+	if !ok {
+		return ServerCertificateInfo{}, false
+	}
+
+	cert := value.(*x509.Certificate)
+
+	return ServerCertificateInfo{
+		Subject:      cert.Subject.String(),
+		Issuer:       cert.Issuer.String(),
+		SerialNumber: cert.SerialNumber.String(),
+		NotBefore:    cert.NotBefore,
+		NotAfter:     cert.NotAfter,
+	}, true
 }
 
 func shouldRetryStatus(ctx context.Context, err error) bool {
