@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/williamveith/fbs-interlock-gateway/internal/applog"
 	"github.com/williamveith/fbs-interlock-gateway/internal/config"
@@ -73,6 +74,7 @@ func runGateway(args []string) (runErr error) {
 
 	resolvedDBPath := resolveRuntimeDBPath(*dbPath, *configPath)
 
+	var asyncArchive *applog.AsyncStore
 	logStore, err := applog.Open(
 		filepath.Join(filepath.Dir(resolvedDBPath), "logs"),
 		applog.DefaultOptions(),
@@ -80,21 +82,18 @@ func runGateway(args []string) (runErr error) {
 	if err != nil {
 		log.Printf("warning: portable log archive disabled: %v", err)
 	} else {
+		asyncArchive = applog.NewAsyncStore(logStore)
 		previousLogWriter := log.Writer()
-		log.SetOutput(io.MultiWriter(previousLogWriter, logStore))
-
+		log.SetOutput(io.MultiWriter(previousLogWriter, asyncArchive))
 		defer func() {
 			if runErr != nil {
 				log.Printf("gateway exiting with error: %v", runErr)
 			}
-
 			log.SetOutput(previousLogWriter)
-			if closeErr := logStore.Close(); closeErr != nil {
-				fmt.Fprintf(
-					os.Stderr,
-					"WARNING: close portable log archive: %v\n",
-					closeErr,
-				)
+			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if closeErr := asyncArchive.Close(drainCtx); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: close portable log archive: %v\n", closeErr)
 			}
 		}()
 	}
@@ -126,8 +125,8 @@ func runGateway(args []string) (runErr error) {
 	defer stop()
 
 	app := gateway.NewWithStore(cfg, store, adminAddr)
-	if logStore != nil {
-		app.SetLogExporter(logStore)
+	if asyncArchive != nil {
+		app.SetLogExporter(asyncArchive)
 	}
 
 	return app.Run(ctx)
