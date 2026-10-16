@@ -1272,3 +1272,339 @@ func TestAdminStatusDoesNotWaitBehindFBS(t *testing.T) {
 		t.Fatal("FBS request did not complete")
 	}
 }
+
+// simulatedShellyServerCertificate creates an actual DER-encoded X.509 leaf in
+// memory. Using parsed certificates is important: x509.Certificate.Equal
+// compares Raw DER bytes, so hand-built certificates with nil Raw would all
+// compare equal even when their serial numbers or expiration dates differ.
+func simulatedShellyServerCertificate(
+	t *testing.T,
+	ca *x509.Certificate,
+	caKey *ecdsa.PrivateKey,
+	hostname string,
+	serial int64,
+	notBefore, notAfter time.Time,
+) *x509.Certificate {
+	t.Helper()
+
+	certPEM, _ := createTestLeafCertificate(t, ca, caKey, &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: hostname},
+		DNSNames:     []string{hostname},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("decode simulated Shelly leaf PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse simulated Shelly leaf certificate: %v", err)
+	}
+	if len(cert.Raw) == 0 {
+		t.Fatal("simulated certificate has no DER representation")
+	}
+	return cert
+}
+
+// TestGetServerCertificateFromSimulatedTLS exercises the production sendGET
+// capture path without connecting to any host, binding a port, or reading a
+// device certificate from disk. The RoundTripper supplies a simulated HTTPS
+// response with the server's parsed X.509 certificate as peer metadata.
+func TestGetServerCertificateFromSimulatedTLS(t *testing.T) {
+	const host = "shelly.example.test"
+	now := time.Now().UTC().Truncate(time.Second)
+	ca, caKey, _ := createTestCA(t, "Test Shelly Server CA", now)
+	served := simulatedShellyServerCertificate(
+		t, ca, caKey, host, 2, now.Add(-time.Minute), now.Add(time.Hour),
+	)
+
+	var requests atomic.Int32
+	client := NewClient(time.Second)
+	client.http.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		if req.URL.Host != host || req.URL.Scheme != "https" {
+			return nil, fmt.Errorf("unexpected simulated request URL: %s", req.URL)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":0,"output":true}`)),
+			Request:    req,
+			TLS:        &tls.ConnectionState{PeerCertificates: []*x509.Certificate{served}},
+		}, nil
+	})
+	tool := config.Tool{
+		InterlockName: "EQU-TEST-CERT", IP: host,
+		Protocol: "https", SwitchID: 0, Enabled: true,
+	}
+
+	if _, ok := client.GetServerCertificate(host); ok {
+		t.Fatal("certificate should not be cached before a simulated request")
+	}
+
+	status, err := client.GetStatus(context.Background(), tool)
+	if err != nil {
+		t.Fatalf("GetStatus() error = %v", err)
+	}
+	if !status.Output {
+		t.Fatal("GetStatus() output = false, want true")
+	}
+
+	got, ok := client.GetServerCertificate(host)
+	if !ok {
+		t.Fatal("certificate was not cached after a simulated HTTPS response")
+	}
+	if got.Subject != served.Subject.String() {
+		t.Errorf("Subject = %q, want %q", got.Subject, served.Subject.String())
+	}
+	if got.Issuer != served.Issuer.String() {
+		t.Errorf("Issuer = %q, want %q", got.Issuer, served.Issuer.String())
+	}
+	if got.SerialNumber != served.SerialNumber.String() {
+		t.Errorf("SerialNumber = %q, want %q", got.SerialNumber, served.SerialNumber.String())
+	}
+	if !got.NotBefore.Equal(served.NotBefore) {
+		t.Errorf("NotBefore = %s, want %s", got.NotBefore, served.NotBefore)
+	}
+	if !got.NotAfter.Equal(served.NotAfter) {
+		t.Errorf("NotAfter = %s, want %s", got.NotAfter, served.NotAfter)
+	}
+
+	// Both production and low-priority Admin requests go through sendGET.
+	if _, err := client.GetStatusAdmin(context.Background(), tool); err != nil {
+		t.Fatalf("GetStatusAdmin() error = %v", err)
+	}
+	again, ok := client.GetServerCertificate(host)
+	if !ok || !again.NotAfter.Equal(served.NotAfter) {
+		t.Fatalf("certificate lost or changed after Admin request: %+v, found=%t", again, ok)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("simulated HTTP requests = %d, want 2 (no certificate polling)", got)
+	}
+	if _, ok := client.GetServerCertificate("different-device.example.test"); ok {
+		t.Fatal("certificate from one device must not appear under another host")
+	}
+}
+
+func TestGetServerCertificateAbsentForPlainHTTP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":0,"output":true}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(time.Second)
+	tool := toolForServer(server)
+
+	if _, ok := client.GetServerCertificate(tool.IP); ok {
+		t.Fatal("unexpected cached certificate before an HTTP request")
+	}
+	if _, err := client.GetStatus(context.Background(), tool); err != nil {
+		t.Fatalf("HTTP GetStatus() error = %v", err)
+	}
+	if _, ok := client.GetServerCertificate(tool.IP); ok {
+		t.Fatal("plain HTTP must not create a certificate cache entry")
+	}
+}
+
+func TestGetServerCertificateReflectsServerCertificateRotation(t *testing.T) {
+	const host = "shelly.example.test"
+	now := time.Now().UTC().Truncate(time.Second)
+	ca, caKey, _ := createTestCA(t, "Test Shelly Server CA", now)
+	first := simulatedShellyServerCertificate(
+		t, ca, caKey, host, 10, now.Add(-time.Minute), now.Add(30*24*time.Hour),
+	)
+	replacement := simulatedShellyServerCertificate(
+		t, ca, caKey, host, 11, now.Add(-time.Minute), now.Add(825*24*time.Hour),
+	)
+	if first.Equal(replacement) {
+		t.Fatal("distinct simulated X.509 certificates compare equal")
+	}
+
+	// All requests are simulated. Certificate replacement happens on the
+	// third response, without requiring a real TLS connection to close or a
+	// server to reload its certificate (both are timing-dependent).
+	var requests atomic.Int32
+	client := NewClient(time.Second)
+	client.http.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		cert := first
+		if requests.Add(1) >= 3 {
+			cert = replacement
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":0,"output":true}`)),
+			Request:    req,
+			TLS:        &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}},
+		}, nil
+	})
+	tool := config.Tool{IP: host, Protocol: "https", SwitchID: 0}
+
+	for attempt := int32(1); attempt <= 3; attempt++ {
+		if _, err := client.GetStatus(context.Background(), tool); err != nil {
+			t.Fatalf("GetStatus() attempt %d: %v", attempt, err)
+		}
+		info, ok := client.GetServerCertificate(host)
+		if !ok {
+			t.Fatalf("missing cached certificate on attempt %d", attempt)
+		}
+
+		want := first
+		if attempt == 3 {
+			want = replacement
+		}
+		if info.SerialNumber != want.SerialNumber.String() || !info.NotAfter.Equal(want.NotAfter) {
+			t.Fatalf("attempt %d: cached certificate = %+v, want serial=%s expiry=%s",
+				attempt, info, want.SerialNumber, want.NotAfter)
+		}
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("simulated HTTP requests = %d, want 3 (no certificate polling)", got)
+	}
+
+	// The public getter should return a metadata copy, not a mutable view into
+	// the cached x509.Certificate.
+	info, _ := client.GetServerCertificate(host)
+	info.Subject = "modified by caller"
+	again, _ := client.GetServerCertificate(host)
+	if again.Subject != replacement.Subject.String() {
+		t.Fatalf("caller modified cached certificate metadata: Subject=%q", again.Subject)
+	}
+}
+
+func TestGetServerCertificateSkipsResponsesWithoutMatchingTLSIdentity(t *testing.T) {
+	host := "shelly.example.test"
+	cert := &x509.Certificate{NotAfter: time.Now().Add(24 * time.Hour)}
+
+	tests := []struct {
+		name        string
+		connection  *tls.ConnectionState
+		responseURL string
+	}{
+		{name: "no TLS state"},
+		{name: "TLS without a peer certificate", connection: &tls.ConnectionState{}},
+		{
+			name:        "redirected to another HTTPS hostname",
+			connection:  &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}},
+			responseURL: "https://other.example.test/rpc/Switch.GetStatus?id=0",
+		},
+		{
+			name:        "final response uses HTTP",
+			connection:  &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}},
+			responseURL: "http://shelly.example.test/rpc/Switch.GetStatus?id=0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(time.Second)
+			client.http.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				responseReq := req
+				if tt.responseURL != "" {
+					redirected, err := http.NewRequest(http.MethodGet, tt.responseURL, nil)
+					if err != nil {
+						t.Fatalf("construct response request: %v", err)
+					}
+					responseReq = redirected
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"id":0,"output":true}`)),
+					TLS:        tt.connection,
+					Request:    responseReq,
+				}, nil
+			})
+
+			if _, err := client.GetStatus(context.Background(), config.Tool{
+				IP: host, Protocol: "https", SwitchID: 0,
+			}); err != nil {
+				t.Fatalf("GetStatus() error = %v", err)
+			}
+			if info, ok := client.GetServerCertificate(host); ok {
+				t.Fatalf("unexpected certificate entry for rejected TLS response: %+v", info)
+			}
+		})
+	}
+}
+
+func TestGetServerCertificateCapturedEvenWhenHTTPSReturnsError(t *testing.T) {
+	host := "shelly.example.test"
+	expires := time.Now().Add(45 * 24 * time.Hour).UTC().Truncate(time.Second)
+	cert := &x509.Certificate{
+		Subject:      pkix.Name{CommonName: host},
+		SerialNumber: big.NewInt(42),
+		NotAfter:     expires,
+	}
+
+	client := NewClient(time.Second)
+	client.http.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Status:     "400 Bad Request",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("invalid switch ID")),
+			Request:    req,
+			TLS:        &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}},
+		}, nil
+	})
+
+	_, err := client.GetStatus(context.Background(), config.Tool{IP: host, Protocol: "https"})
+	if !IsHTTPStatus(err, http.StatusBadRequest) {
+		t.Fatalf("GetStatus() error = %v, want HTTP 400", err)
+	}
+	info, ok := client.GetServerCertificate(host)
+	if !ok || !info.NotAfter.Equal(expires) {
+		t.Fatalf("valid TLS peer certificate not cached on HTTP error: %+v, found=%t", info, ok)
+	}
+}
+
+func TestGetServerCertificateConcurrentReads(t *testing.T) {
+	const host = "shelly.example.test"
+	expires := time.Now().Add(200 * 24 * time.Hour).UTC().Truncate(time.Second)
+	cert := &x509.Certificate{SerialNumber: big.NewInt(99), NotAfter: expires}
+	client := NewClient(time.Second)
+	client.http.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":0,"output":true}`)),
+			Request:    req,
+			TLS:        &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}},
+		}, nil
+	})
+
+	tool := config.Tool{IP: host, Protocol: "https"}
+	const count = 20
+	errCh := make(chan error, 2*count)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := client.GetStatus(context.Background(), tool)
+			if err != nil {
+				errCh <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			info, ok := client.GetServerCertificate(host)
+			if ok && !info.NotAfter.Equal(expires) {
+				errCh <- fmt.Errorf("unexpected expiry during concurrent access: %s", info.NotAfter)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	if info, ok := client.GetServerCertificate(host); !ok || !info.NotAfter.Equal(expires) {
+		t.Fatalf("certificate missing after concurrent operations: %+v, found=%t", info, ok)
+	}
+}
