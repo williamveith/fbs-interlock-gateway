@@ -1373,6 +1373,9 @@ func TestGetServerCertificateFromSimulatedTLS(t *testing.T) {
 	if !got.NotAfter.Equal(served.NotAfter) {
 		t.Errorf("NotAfter = %s, want %s", got.NotAfter, served.NotAfter)
 	}
+	if got.ObservedAt.IsZero() || got.ObservedAt.Before(now) {
+		t.Errorf("ObservedAt = %s, expected observation after %s", got.ObservedAt, now)
+	}
 
 	// Both production and low-priority Admin requests go through sendGET.
 	if _, err := client.GetStatusAdmin(context.Background(), tool); err != nil {
@@ -1381,6 +1384,9 @@ func TestGetServerCertificateFromSimulatedTLS(t *testing.T) {
 	again, ok := client.GetServerCertificate(host)
 	if !ok || !again.NotAfter.Equal(served.NotAfter) {
 		t.Fatalf("certificate lost or changed after Admin request: %+v, found=%t", again, ok)
+	}
+	if again.ObservedAt.Before(got.ObservedAt) {
+		t.Fatalf("ObservedAt moved backwards: first=%s second=%s", got.ObservedAt, again.ObservedAt)
 	}
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("simulated HTTP requests = %d, want 2 (no certificate polling)", got)

@@ -110,19 +110,12 @@ type SwitchStatus struct {
 func NewClient(timeout time.Duration) *Client {
 	client, err := newClient(timeout, config.ShellyTLSConfig{})
 	if err != nil {
-		// An empty TLS configuration cannot produce an error. Panic here makes a
-		// future programming regression immediately visible instead of returning
-		// a partially initialized client.
 		panic(fmt.Sprintf("initialize Shelly client: %v", err))
 	}
 
 	return client
 }
 
-// NewClientWithTLS creates a Shelly client that verifies each HTTPS Shelly
-// server against ServerCAFile and presents the configured client certificate
-// and private key during the mutual-TLS handshake. The same client can still
-// communicate with tools configured to use plain HTTP.
 func NewClientWithTLS(
 	timeout time.Duration,
 	tlsConfig config.ShellyTLSConfig,
@@ -165,9 +158,6 @@ func newClient(
 
 	return &Client{
 		http: &http.Client{
-			// The operation context below is the single end-to-end timeout. Keeping
-			// Client.Timeout disabled prevents a second, competing deadline that
-			// obscures whether DNS, TCP, TLS, or response headers stalled.
 			Transport: transport,
 		},
 		requestTimeout:              timeout,
@@ -186,9 +176,6 @@ func (c *Client) GetStatus(
 	return c.getStatus(ctx, tool, requestPriorityFBS)
 }
 
-// GetStatusAdmin performs a low-priority status request for the Admin UI.
-// It never waits behind another request, and an arriving FBS request can
-// cancel it so production traffic receives the device slot immediately.
 func (c *Client) GetStatusAdmin(
 	ctx context.Context,
 	tool config.Tool,
@@ -215,8 +202,6 @@ func (c *Client) getStatus(
 	var lastErr error
 
 	for attempt := 1; attempt <= maxStatusAttempts; attempt++ {
-		// Each attempt receives the configured Shelly timeout. The caller's
-		// context can still impose a shorter overall deadline.
 		attemptCtx, cancel := context.WithTimeout(
 			ctx,
 			c.requestTimeout,
@@ -328,8 +313,6 @@ func (c *Client) Set(ctx context.Context, tool config.Tool, on bool) error {
 	return nil
 }
 
-// Reboot requests a Shelly device restart. It intentionally does not invoke
-// automatic recovery if the reboot request itself fails, preventing recursion.
 func (c *Client) Reboot(ctx context.Context, tool config.Tool) error {
 	ctx, cancel := c.withRequestTimeout(ctx)
 	defer cancel()
@@ -546,9 +529,6 @@ func (c *Client) doGETWithPriority(
 		}
 	}
 
-	// Retain the per-device slot until the caller has finished reading and
-	// closing the response. This prevents another RPC from beginning while
-	// the preceding response is still active.
 	resp.Body = &releaseOnCloseBody{
 		ReadCloser: body,
 		release:    release,
@@ -721,16 +701,18 @@ func (c *Client) sendGET(
 		resp.Request.URL.Scheme == "https" &&
 		resp.Request.URL.Host == req.URL.Host {
 
-		cert := resp.TLS.PeerCertificates[0]
-
-		previous, ok := c.serverCertificates.Load(req.URL.Host)
-
-		if !ok || !previous.(*x509.Certificate).Equal(cert) {
-			c.serverCertificates.Store(req.URL.Host, cert)
-		}
+		c.serverCertificates.Store(req.URL.Host, observedServerCertificate{
+			certificate: resp.TLS.PeerCertificates[0],
+			observedAt:  time.Now().UTC(),
+		})
 	}
 
 	return resp, nil
+}
+
+type observedServerCertificate struct {
+	certificate *x509.Certificate
+	observedAt  time.Time
 }
 
 type ServerCertificateInfo struct {
@@ -739,6 +721,7 @@ type ServerCertificateInfo struct {
 	SerialNumber string    `json:"serial_number"`
 	NotBefore    time.Time `json:"not_before"`
 	NotAfter     time.Time `json:"not_after"`
+	ObservedAt   time.Time `json:"observed_at"`
 }
 
 func (c *Client) GetServerCertificate(
@@ -749,7 +732,8 @@ func (c *Client) GetServerCertificate(
 		return ServerCertificateInfo{}, false
 	}
 
-	cert := value.(*x509.Certificate)
+	observation := value.(observedServerCertificate)
+	cert := observation.certificate
 
 	return ServerCertificateInfo{
 		Subject:      cert.Subject.String(),
@@ -757,6 +741,7 @@ func (c *Client) GetServerCertificate(
 		SerialNumber: cert.SerialNumber.String(),
 		NotBefore:    cert.NotBefore,
 		NotAfter:     cert.NotAfter,
+		ObservedAt:   observation.observedAt,
 	}, true
 }
 
@@ -837,8 +822,6 @@ func (s *deviceAuthState) acquireAdmin(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Admin status checks are opportunistic. They never queue behind another
-	// request and never begin while production FBS traffic is waiting.
 	if s.fbsWaiters > 0 {
 		return nil, nil, ErrAdminStatusDeferred
 	}

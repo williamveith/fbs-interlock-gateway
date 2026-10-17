@@ -17,6 +17,13 @@ WINDOWS_DIR := $(BUILD_DIR)/windows
 WINDOWS_TLS_BUILD_DIR := $(WINDOWS_DIR)/tls
 
 CONFIGS := config.yaml
+
+# Platform packages always use TLS files bundled with that package.
+DEPLOYMENT_CONFIG_FILES := \
+	$(MAC_ARM64_DIR)/config.yaml \
+	$(MAC_AMD64_DIR)/config.yaml \
+	$(LINUX_DIR)/config.yaml \
+	$(WINDOWS_DIR)/config.yaml
 CONFIG_DIR ?= /etc/$(APP)
 CONFIG_PATH ?= $(CONFIG_DIR)/$(CONFIGS)
 
@@ -238,6 +245,7 @@ endif
 	build-check \
 	verify \
 	init-config \
+	force-deployment-config \
 	build \
 	build-mac \
 	build-darwin-arm64 \
@@ -286,6 +294,42 @@ build-mac: build-darwin-arm64
 # =========================
 # GENERATED DEPLOYMENT FILES
 # =========================
+
+# Always regenerate the packaged copy, leaving the source config.yaml untouched.
+# Its TLS entries must point to the certificates shipped in each deployment's
+# tls/ directory, regardless of absolute paths in the source configuration.
+.PHONY: force-deployment-config
+force-deployment-config:
+
+$(DEPLOYMENT_CONFIG_FILES): force-deployment-config
+	@mkdir -p "$(@D)"
+	@set -eu; \
+		umask 077; \
+		tmp="$@.tmp"; \
+		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+		awk '\
+			/^[[:space:]]*server_ca_file[[:space:]]*:/ { \
+				sub(/:[[:space:]]*.*/, ": \"./tls/server-ca.crt\""); \
+				server_ca++; \
+			} \
+			/^[[:space:]]*client_cert_file[[:space:]]*:/ { \
+				sub(/:[[:space:]]*.*/, ": \"./tls/gateway-client.crt\""); \
+				client_cert++; \
+			} \
+			/^[[:space:]]*client_key_file[[:space:]]*:/ { \
+				sub(/:[[:space:]]*.*/, ": \"./tls/gateway-client.key\""); \
+				client_key++; \
+			} \
+			{ print } \
+			END { \
+				if (server_ca != 1 || client_cert != 1 || client_key != 1) { \
+					print "ERROR: config.yaml must contain exactly one server_ca_file, client_cert_file, and client_key_file" > "/dev/stderr"; \
+					exit 1; \
+				} \
+			}' "$(CONFIGS)" > "$$tmp"; \
+		mv -f "$$tmp" "$@"; \
+		trap - EXIT HUP INT TERM
+
 
 $(SERVICE_OUT): $(SERVICE_TEMPLATE) Makefile
 	mkdir -p "$(LINUX_DIR)"
@@ -699,9 +743,8 @@ define copy_macos_tls
 endef
 
 
-build-darwin-arm64: fmt check-runtime-tls macos-arm64-deployment-guides $(MACOS_ARM64_DEPLOYMENT_FILES)
+build-darwin-arm64: fmt check-runtime-tls macos-arm64-deployment-guides $(MACOS_ARM64_DEPLOYMENT_FILES) $(MAC_ARM64_DIR)/config.yaml
 	mkdir -p "$(MAC_ARM64_DIR)"
-	cp "$(CONFIGS)" "$(MAC_ARM64_DIR)/"
 	$(call copy_macos_tls,$(MAC_ARM64_TLS_DIR))
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
 		$(GO_BUILD_FLAGS) \
@@ -709,9 +752,8 @@ build-darwin-arm64: fmt check-runtime-tls macos-arm64-deployment-guides $(MACOS_
 		-o "$(MAC_ARM64_DIR)/$(APP)" \
 		$(CMD)
 
-build-darwin-amd64: fmt check-runtime-tls macos-amd64-deployment-guides $(MACOS_AMD64_DEPLOYMENT_FILES)
+build-darwin-amd64: fmt check-runtime-tls macos-amd64-deployment-guides $(MACOS_AMD64_DEPLOYMENT_FILES) $(MAC_AMD64_DIR)/config.yaml
 	mkdir -p "$(MAC_AMD64_DIR)"
-	cp "$(CONFIGS)" "$(MAC_AMD64_DIR)/"
 	$(call copy_macos_tls,$(MAC_AMD64_TLS_DIR))
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
 		$(GO_BUILD_FLAGS) \
@@ -719,9 +761,8 @@ build-darwin-amd64: fmt check-runtime-tls macos-amd64-deployment-guides $(MACOS_
 		-o "$(MAC_AMD64_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT) $(JOURNALD_CONFIG_OUT)
+build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT) $(JOURNALD_CONFIG_OUT) $(LINUX_DIR)/config.yaml
 	mkdir -p "$(LINUX_DIR)"
-	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
 		$(GO_BUILD_FLAGS) \
@@ -729,9 +770,8 @@ build-linux-arm64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT) $(JOURNALD_CONFIG_OUT)
+build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) $(INSTALL_OUT) $(INSTALL_DEV_OUT) $(UNINSTALL_OUT) $(UPDATE_OUT) $(UPDATE_SERVICE_OUT) $(UPDATE_TIMER_OUT) $(JOURNALD_CONFIG_OUT) $(LINUX_DIR)/config.yaml
 	mkdir -p "$(LINUX_DIR)"
-	cp "$(CONFIGS)" "$(LINUX_DIR)/"
 	$(copy_linux_tls)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		$(GO_BUILD_FLAGS) \
@@ -739,9 +779,8 @@ build-linux-amd64: fmt check-runtime-tls linux-deployment-guides $(SERVICE_OUT) 
 		-o "$(LINUX_DIR)/$(APP)" \
 		$(CMD)
 
-build-windows-amd64: fmt check-runtime-tls windows-deployment-guides $(WINDOWS_DEPLOYMENT_FILES)
+build-windows-amd64: fmt check-runtime-tls windows-deployment-guides $(WINDOWS_DEPLOYMENT_FILES) $(WINDOWS_DIR)/config.yaml
 	mkdir -p "$(WINDOWS_DIR)"
-	cp "$(CONFIGS)" "$(WINDOWS_DIR)/"
 	$(copy_windows_tls)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
 		$(GO_BUILD_FLAGS) \

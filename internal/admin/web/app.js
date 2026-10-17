@@ -25,6 +25,16 @@ const STATUS_HEADERS = [
     'Protocol'
 ];
 
+const CERTIFICATE_HEADERS = [
+    'Interlock',
+    'Shelly',
+    'Expires',
+    'Days Left',
+    'Subject',
+    'Last Observed',
+    'Status'
+];
+
 const CONFIG_HEADERS = [
     'Enabled',
     'Tool Name',
@@ -421,6 +431,7 @@ async function loadStatus({ requestRefresh = false } = {}) {
         }
 
         renderStatus(rows);
+        renderCertificates(rows);
         return refreshInProgress;
     } catch (error) {
         const message = getErrorMessage(error);
@@ -429,6 +440,7 @@ async function loadStatus({ requestRefresh = false } = {}) {
         renderStatusError(
             `Unable to load live status: ${message}`
         );
+        renderCertificatesError(`Unable to load certificate status: ${message}`);
 
         return false;
     } finally {
@@ -598,6 +610,80 @@ function renderStatusError(message) {
 
     row.appendChild(cell);
     tbody.appendChild(row);
+}
+
+// =========================
+// CERTIFICATES (PASSIVE DATA FROM /api/status)
+// =========================
+
+function formatCertificateDate(value) {
+    if (!value) {
+        return '—';
+    }
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString();
+}
+
+function certificateLabel(state) {
+    switch (state) {
+        case 'valid': return 'Valid';
+        case 'expiring_soon': return 'Expiring soon';
+        case 'expired': return 'Expired';
+        case 'not_yet_valid': return 'Not yet valid';
+        case 'not_applicable': return 'Not applicable (HTTP)';
+        default: return 'Unknown';
+    }
+}
+
+function renderCertificates(rows) {
+    const table = document.getElementById('certificateTable');
+    if (!table) {
+        return;
+    }
+    table.replaceChildren();
+    const thead = document.createElement('thead');
+    thead.appendChild(createHeaderRow(CERTIFICATE_HEADERS));
+    const tbody = document.createElement('tbody');
+
+    for (const row of rows) {
+        const cert = row.certificate ?? { state: 'unknown' };
+        const tr = document.createElement('tr');
+        const remaining = typeof cert.days_remaining === 'number'
+            ? String(cert.days_remaining)
+            : '—';
+        const fields = [
+            row.interlock_name,
+            row.ip,
+            formatCertificateDate(cert.not_after),
+            remaining,
+            cert.subject || '—',
+            formatCertificateDate(cert.observed_at),
+            certificateLabel(cert.state)
+        ];
+        for (const field of fields) {
+            tr.appendChild(createCell(field));
+        }
+        tr.cells[6].classList.toggle('certificate-warning',
+            cert.state === 'expiring_soon' || cert.state === 'not_yet_valid');
+        tr.cells[6].classList.toggle('error', cert.state === 'expired');
+        tbody.appendChild(tr);
+    }
+
+    if (rows.length === 0) {
+        const tr = document.createElement('tr');
+        const td = createCell('No interlocks configured.');
+        td.colSpan = CERTIFICATE_HEADERS.length;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+    }
+    table.append(thead, tbody);
+}
+
+function renderCertificatesError(message) {
+    const table = document.getElementById('certificateTable');
+    if (table) {
+        replaceTableWithMessage(table, CERTIFICATE_HEADERS, message, { error: true });
+    }
 }
 
 // =========================
