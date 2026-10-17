@@ -209,6 +209,100 @@ validate_binary() {
   "$BIN_SRC" -version
 }
 
+# Homebrew is never run as root. Install as the owner of its prefix, even
+# though the rest of this gateway installer runs as root.
+install_pkcs11_dependencies() {
+  local brew_bin=""
+  local brew_prefix=""
+  local brew_user=""
+  local pkcs11_tool=""
+  local module_path=""
+  local candidate=""
+
+  for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "$candidate" ]]; then
+      brew_bin="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$brew_bin" ]]; then
+    echo "ERROR: Homebrew is required to install OpenSC and Yubico PIV Tool on macOS."
+    echo "Install Homebrew before running this gateway installer."
+    return 1
+  fi
+
+  brew_prefix="$($brew_bin --prefix)"
+  # When invoked by sudo, use the invoking Homebrew owner; direct-root
+  # invocation falls back to the Cellar owner rather than the prefix root.
+  brew_user="${SUDO_USER:-}"
+  if [[ -z "$brew_user" || "$brew_user" == root ]]; then
+    brew_user="$(stat -f '%Su' "${brew_prefix}/Cellar")"
+  fi
+  if [[ -z "$brew_user" || "$brew_user" == root ]]; then
+    echo "ERROR: Unable to determine a non-root Homebrew owner."
+    return 1
+  fi
+
+  echo "Installing/verifying OpenSC and Yubico PIV Tool (Homebrew owner: ${brew_user})..."
+  sudo -H -u "$brew_user" "$brew_bin" install opensc yubico-piv-tool
+
+  pkcs11_tool="${brew_prefix}/opt/opensc/bin/pkcs11-tool"
+  if [[ ! -x "$pkcs11_tool" ]]; then
+    echo "ERROR: Homebrew did not install the pkcs11-tool executable: $pkcs11_tool"
+    return 1
+  fi
+
+  module_path="${brew_prefix}/opt/yubico-piv-tool/lib/libykcs11.dylib"
+  if [[ ! -f "$module_path" ]]; then
+    echo "ERROR: Homebrew did not install the YKCS11 module: $module_path"
+    return 1
+  fi
+
+  echo "Verifying OpenSC can load YKCS11 without a PIN or token..."
+  if ! "$pkcs11_tool" --module "$module_path" --show-info; then
+    echo "ERROR: pkcs11-tool could not load YKCS11."
+    return 1
+  fi
+
+  echo "Native signer executable: $pkcs11_tool"
+  echo "YKCS11 module: $module_path"
+  echo "PIN, private keys and YubiKey slots were not changed."
+}
+
+# launchd does not inherit the interactive Homebrew PATH. Ensure exec.Command
+# in the gateway can locate pkcs11-tool even when running as a system daemon.
+configure_gateway_signer_path() {
+  local plist_path="$1"
+  local brew_prefix=""
+  local brew_bin=""
+  local path_value=""
+  local original_path=""
+  local plistbuddy="/usr/libexec/PlistBuddy"
+  for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "$brew_bin" ]]; then
+      break
+    fi
+  done
+  brew_prefix="$($brew_bin --prefix)"
+  path_value="${brew_prefix}/opt/opensc/bin:${brew_prefix}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+  if ! "$plistbuddy" -c 'Print :EnvironmentVariables' "$plist_path" >/dev/null 2>&1; then
+    "$plistbuddy" -c 'Add :EnvironmentVariables dict' "$plist_path"
+  fi
+  if "$plistbuddy" -c 'Print :EnvironmentVariables:PATH' "$plist_path" >/dev/null 2>&1; then
+    original_path="$($plistbuddy -c 'Print :EnvironmentVariables:PATH' "$plist_path")"
+    # Preserve any paths explicitly supplied by the launchd template.
+    if [[ ":${original_path}:" != *":${brew_prefix}/opt/opensc/bin:"* ]]; then
+      path_value="${brew_prefix}/opt/opensc/bin:${original_path}"
+    else
+      path_value="$original_path"
+    fi
+    "$plistbuddy" -c "Set :EnvironmentVariables:PATH $path_value" "$plist_path"
+  else
+    "$plistbuddy" -c "Add :EnvironmentVariables:PATH string $path_value" "$plist_path"
+  fi
+}
+
 configure_application_firewall() {
   if [[ ! -x "$FIREWALL_TOOL" ]]; then
     echo "WARNING: macOS Application Firewall tool not found."
@@ -448,6 +542,7 @@ if [[ "$DEVELOPMENT_INSTALL" == false ]]; then
 fi
 
 validate_binary
+install_pkcs11_dependencies
 create_service_account
 
 if job_loaded "$LAUNCHD_LABEL"; then
@@ -572,6 +667,7 @@ fi
 
 echo "Installing the gateway LaunchDaemon..."
 install -o root -g wheel -m 0644 "$PLIST_SRC" "$PLIST_PATH"
+configure_gateway_signer_path "$PLIST_PATH"
 plutil -lint "$PLIST_PATH" >/dev/null
 
 if [[ "$DEVELOPMENT_INSTALL" == false ]]; then

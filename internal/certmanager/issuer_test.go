@@ -90,28 +90,28 @@ func TestRejectInvalidSignerAndBadBundles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, badHost := range []string{"", "foo", "foo.example.test:443", "*.example.test", "UPPER.example.test", "foo/example.test", "-foo.example.test"} {
+	for _, badHost := range []string{"", "foo", "foo.example.test:443", "*.example.test", "UPPER.example.test", "foo/example.test", "-foo.example.test", "shelly.example.test"} {
 		if _, err := issuer.Issue(badHost, now); err == nil {
 			t.Errorf("accepted invalid host %q", badHost)
 		}
 	}
-	bundle, err := issuer.Issue("shelly.example.test", now)
+	bundle, err := issuer.Issue("a085e3b5325c.dynamic.utexas.edu", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateBundle(bundle, ca, "different.example.test", now); err == nil {
+	if err := ValidateBundle(bundle, ca, "different.dynamic.utexas.edu", now); err == nil {
 		t.Fatal("accepted wrong hostname")
 	}
 	wrongCA, _ := newTestCA(t, now, now.Add(4*365*24*time.Hour))
-	if err := ValidateBundle(bundle, wrongCA, "shelly.example.test", now); err == nil {
+	if err := ValidateBundle(bundle, wrongCA, "a085e3b5325c.dynamic.utexas.edu", now); err == nil {
 		t.Fatal("accepted wrong root CA")
 	}
-	otherBundle, err := issuer.Issue("shelly.example.test", now)
+	otherBundle, err := issuer.Issue("a085e3b5325c.dynamic.utexas.edu", now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	otherBundle.PrivateKeyPEM = bundle.PrivateKeyPEM
-	if err := ValidateBundle(otherBundle, ca, "shelly.example.test", now); err == nil {
+	if err := ValidateBundle(otherBundle, ca, "a085e3b5325c.dynamic.utexas.edu", now); err == nil {
 		t.Fatal("accepted mismatched leaf/key")
 	}
 }
@@ -123,7 +123,7 @@ func TestRefusesCAAboutToExpire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := issuer.Issue("shelly.example.test", now); err == nil {
+	if _, err := issuer.Issue("a085e3b5325c.dynamic.utexas.edu", now); err == nil {
 		t.Fatal("expected CA expiry guard")
 	}
 }
@@ -132,11 +132,11 @@ func TestIssuerUsesDistinctSerialAndServerKeys(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	ca, key := newTestCA(t, now, now.Add(4*365*24*time.Hour))
 	issuer, _ := NewIssuer(ca, key)
-	first, err := issuer.Issue("shelly.example.test", now)
+	first, err := issuer.Issue("a085e3b5325c.dynamic.utexas.edu", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := issuer.Issue("shelly.example.test", now)
+	second, err := issuer.Issue("a085e3b5325c.dynamic.utexas.edu", now)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,6 +21,10 @@ REQUIRED_PACKAGES=(
   curl
   ca-certificates
   ufw
+  opensc             # supplies pkcs11-tool (external process invoked by Go)
+  ykcs11             # supplies Yubico libykcs11.so PKCS#11 module
+  pcscd              # PC/SC smart-card service
+  libccid            # USB CCID reader driver
 )
 
 EXPECTED_UFW_RULE="ufw allow from ${FBS_SOURCE_IP} to any port ${FBS_PORT_RANGE} proto tcp"
@@ -171,6 +175,50 @@ install_missing_dependencies() {
   echo
   echo "Dependency installation complete."
   echo
+}
+
+# Resolve actual distribution library location; do not assume /usr/local/lib.
+# This verification is read-only and does not require a YubiKey, PIN, or touch.
+verify_pkcs11_dependencies() {
+  local tool_path=""
+  local module_path=""
+  local candidate=""
+
+  tool_path="$(command -v pkcs11-tool || true)"
+  if [[ -z "$tool_path" || ! -x "$tool_path" ]]; then
+    echo "ERROR: OpenSC pkcs11-tool is not installed or executable."
+    return 1
+  fi
+
+  # Prefer the distro package's actual file rather than guessing the triplet.
+  while IFS= read -r candidate; do
+    if [[ -f "$candidate" ]]; then
+      module_path="$candidate"
+      break
+    fi
+  done < <(dpkg-query -L ykcs11 2>/dev/null | grep -E '/libykcs11\.so$' || true)
+  if [[ -z "$module_path" && -f /usr/local/lib/libykcs11.so ]]; then
+    module_path=/usr/local/lib/libykcs11.so
+  fi
+  if [[ -z "$module_path" ]]; then
+    echo "ERROR: The Yubico YKCS11 shared library was not found."
+    return 1
+  fi
+
+  # pcscd is normally activated on demand through its systemd socket.
+  if systemctl list-unit-files pcscd.socket --no-legend 2>/dev/null | grep -q '^pcscd.socket'; then
+    systemctl enable --now pcscd.socket
+  fi
+
+  echo "Verifying OpenSC can load the YKCS11 module (no token authentication)..."
+  if ! "$tool_path" --module "$module_path" --show-info; then
+    echo "ERROR: pkcs11-tool cannot load YKCS11: $module_path"
+    return 1
+  fi
+
+  echo "Native signer executable: $tool_path"
+  echo "YKCS11 module: $module_path"
+  echo "PIN, private keys and YubiKey slots were not changed."
 }
 
 configure_ufw() {
@@ -422,6 +470,7 @@ rollback_install() {
 }
 
 install_missing_dependencies
+verify_pkcs11_dependencies
 configure_ufw
 
 require_file "$BIN_SRC" "application binary"

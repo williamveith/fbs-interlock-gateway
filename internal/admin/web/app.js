@@ -718,11 +718,19 @@ function createInput({
     }
 
     if (min !== null) {
-        input.min = String(min);
+        if (type == 'text') {
+            input.minLength = String(min)
+        } else {
+            input.min = String(min);
+        }
     }
 
     if (max !== null) {
-        input.max = String(max);
+        if (type == 'text') {
+            input.maxLength = String(max)
+        } else {
+            input.max = String(max);
+        }
     }
 
     if (unique) {
@@ -768,6 +776,8 @@ function createConfigRow(tool, index) {
         field: 'interlock_name',
         unique: true,
         required: true,
+        min: 1,
+        max: 16,
         index
     }));
 

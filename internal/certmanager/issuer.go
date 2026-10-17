@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -24,7 +25,7 @@ const (
 )
 
 // Issuer uses a crypto.Signer, not a software CA private key. The real signer
-// may be implemented by a separate YubiKey PIV signing process. Only the
+// may invoke an installed pkcs11-tool backed by YKCS11. Only the
 // replaceable per-Shelly *leaf* key is generated outside the signer.
 type Issuer struct {
 	ca     *x509.Certificate
@@ -94,6 +95,15 @@ func (i *Issuer) Issue(host string, now time.Time) (*Bundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate device key: %w", err)
 	}
+	// Match the original OpenSSL shelly-server.cnf: subjectKeyIdentifier = hash.
+	// An ECDSA P-256 public key's ECDH encoding is the same uncompressed
+	// subjectPublicKey octets hashed by OpenSSL for this extension. SHA-1 here
+	// is the RFC 5280 identifier construction, not a signature algorithm.
+	publicECDH, err := leafKey.PublicKey.ECDH()
+	if err != nil {
+		return nil, fmt.Errorf("encode device public key for SKI: %w", err)
+	}
+	ski := sha1.Sum(publicECDH.Bytes())
 	template := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: host},
@@ -103,7 +113,10 @@ func (i *Issuer) Issue(host string, now time.Time) (*Bundle, error) {
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
+		SubjectKeyId:          ski[:],
 	}
+	// Go's x509.CreateCertificate copies the CA's SubjectKeyId into the
+	// leaf AuthorityKeyId, matching authorityKeyIdentifier = keyid,issuer.
 	der, err := x509.CreateCertificate(rand.Reader, template, i.ca, &leafKey.PublicKey, i.signer)
 	if err != nil {
 		return nil, fmt.Errorf("CA signer failed: %w", err)
@@ -157,8 +170,19 @@ func ValidateBundle(bundle *Bundle, ca *x509.Certificate, host string, now time.
 	}); err != nil {
 		return fmt.Errorf("verify device certificate: %w", err)
 	}
-	if leaf.IsCA || len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != host {
-		return errors.New("device certificate must be a non-CA leaf with exactly the requested DNS SAN")
+	if leaf.IsCA || !leaf.BasicConstraintsValid || leaf.Subject.CommonName != host {
+		return errors.New("device certificate must be a non-CA leaf with the requested common name")
+	}
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != host || len(leaf.IPAddresses) != 0 ||
+		len(leaf.EmailAddresses) != 0 || len(leaf.URIs) != 0 {
+		return errors.New("device certificate must have exactly the requested DNS SAN and no other SANs")
+	}
+	if leaf.KeyUsage != x509.KeyUsageDigitalSignature ||
+		len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
+		return errors.New("device certificate must have digitalSignature and serverAuth usages")
+	}
+	if len(leaf.SubjectKeyId) == 0 || len(ca.SubjectKeyId) == 0 || !bytes.Equal(leaf.AuthorityKeyId, ca.SubjectKeyId) {
+		return errors.New("device certificate must include matching subject and authority key identifiers")
 	}
 	return nil
 }
@@ -170,6 +194,11 @@ func validateDNSHostname(host string) error {
 	labels := strings.Split(host, ".")
 	if len(labels) < 2 {
 		return fmt.Errorf("device hostname must be a full DNS name: %q", host)
+	}
+	// Original create-shelly-cert.sh only issued for UT Austin DDNS hosts.
+	// Do not mint certificates for arbitrary DNS names or IP addresses.
+	if !strings.HasSuffix(host, ".dynamic.utexas.edu") || len(labels) < 4 {
+		return fmt.Errorf("device hostname must end in .dynamic.utexas.edu: %q", host)
 	}
 	for _, label := range labels {
 		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {

@@ -357,6 +357,141 @@ function Restore-Path {
     }
 }
 
+# Native certificate signer dependencies are installed system-wide, not placed
+# in the gateway deployment directory. No PIN, token or CA key is accessed.
+function Find-Pkcs11Tool {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'OpenSC Project\OpenSC\tools\pkcs11-tool.exe'),
+        (Join-Path $env:ProgramFiles 'OpenSC Project\OpenSC\pkcs11-tool.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    $command = Get-Command pkcs11-tool.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
+function Find-Ykcs11Module {
+    $roots = @(
+        (Join-Path $env:ProgramFiles 'Yubico\Yubico PIV Tool'),
+        (Join-Path $env:ProgramFiles 'Yubico PIV Tool'),
+        (Join-Path $env:ProgramFiles 'Yubico')
+    )
+    foreach ($root in ($roots | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            continue
+        }
+        $modules = @(Get-ChildItem -LiteralPath $root -Filter 'libykcs11*.dll' `
+            -Recurse -File -ErrorAction SilentlyContinue)
+        if ($modules.Count -gt 0) {
+            return $modules[0].FullName
+        }
+    }
+    return $null
+}
+
+function Install-VerifiedMsi {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$ExpectedSha256
+    )
+    $msiPath = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N') + '.msi')
+    try {
+        Write-Host "Downloading $Name from its upstream release..."
+        Invoke-WebRequest -Uri $Url -OutFile $msiPath -UseBasicParsing
+        $actual = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash
+        if ($actual -ne $ExpectedSha256) {
+            throw "$Name MSI SHA-256 does not match its pinned value. Installation aborted."
+        }
+        Write-Host "Installing $Name (verified SHA-256)..."
+        $msi = Start-Process -FilePath 'msiexec.exe' `
+            -ArgumentList @('/i', ('"' + $msiPath + '"'), '/qn', '/norestart') `
+            -Wait -PassThru
+        if ($msi.ExitCode -notin @(0, 3010)) {
+            throw "$Name MSI installation failed with exit code $($msi.ExitCode)."
+        }
+        if ($msi.ExitCode -eq 3010) {
+            Write-Warning "$Name installation requested a Windows restart."
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Add-NativeSignerPath {
+    param([Parameter(Mandatory)][string[]]$Directories)
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $existing = @($machinePath -split ';' | Where-Object { $_ })
+    $changed = $false
+    foreach ($directory in $Directories) {
+        if (-not ($existing | Where-Object {
+            $_.TrimEnd('\\') -ieq $directory.TrimEnd('\\')
+        })) {
+            $existing += $directory
+            $changed = $true
+        }
+        if (-not (($env:Path -split ';') | Where-Object {
+            $_.TrimEnd('\\') -ieq $directory.TrimEnd('\\')
+        })) {
+            $env:Path += ';' + $directory
+        }
+    }
+    if ($changed) {
+        [Environment]::SetEnvironmentVariable('Path', ($existing -join ';'), 'Machine')
+    }
+}
+
+function Install-Pkcs11Dependencies {
+    $tool = Find-Pkcs11Tool
+    $module = Find-Ykcs11Module
+
+    if (-not $tool) {
+        # OpenSC 0.27.1 upstream x64 MSI SHA-256, published by OpenSC.
+        Install-VerifiedMsi `
+            -Name 'OpenSC 0.27.1 x64' `
+            -Url 'https://github.com/OpenSC/OpenSC/releases/download/0.27.1/OpenSC-0.27.1_x64.msi' `
+            -ExpectedSha256 '88EA45E848063FF5F3594A457B7F023223472EAE9C9C543F8035F7689BB7B319'
+        $tool = Find-Pkcs11Tool
+    }
+    if (-not $module) {
+        # Vendor MSI version 2.7.3, fixed URL with a pinned SHA-256.
+        Install-VerifiedMsi `
+            -Name 'Yubico PIV Tool 2.7.3 x64 (includes YKCS11)' `
+            -Url 'https://developers.yubico.com/yubico-piv-tool/Releases/yubico-piv-tool-2.7.3-win64.msi' `
+            -ExpectedSha256 '11BA3AE2FEF97DB0E8CC38FB61C84E2473D67E7A9BE732A47DAEDC80D304C379'
+        $module = Find-Ykcs11Module
+    }
+    if (-not $tool -or -not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+        throw 'OpenSC installation did not provide pkcs11-tool.exe.'
+    }
+    if (-not $module -or -not (Test-Path -LiteralPath $module -PathType Leaf)) {
+        throw 'Yubico PIV Tool installation did not provide libykcs11.dll.'
+    }
+
+    # YKCS11 depends on DLLs alongside it; the gateway runs under LOCAL SERVICE.
+    # Persist paths for future scheduled tasks and refresh this install process.
+    Add-NativeSignerPath -Directories @(
+        (Split-Path -Parent $tool),
+        (Split-Path -Parent $module)
+    )
+
+    Write-Host 'Verifying OpenSC can load the YKCS11 module (no PIN/token required)...'
+    & $tool --module $module --show-info | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "pkcs11-tool could not load the YKCS11 DLL: $module"
+    }
+    $script:NativePkcs11Tool = $tool
+    $script:NativeYkcs11Module = $module
+    Write-Host "Native signer executable: $tool"
+    Write-Host "YKCS11 module: $module"
+    Write-Host 'PIN, private keys and YubiKey slots were not changed.'
+}
+
 function Install-ApplicationFiles {
     Write-Host "Creating installation directory: $InstallDirectory"
     New-DirectoryIfMissing -Path $InstallDirectory
@@ -736,6 +871,9 @@ else {
     Write-Host 'Mode: production'
 }
 Write-Host ''
+
+# Install native dependencies before stopping an existing gateway.
+Install-Pkcs11Dependencies
 
 $backupDirectory = Join-Path $env:TEMP (
     '{0}-install-backup-{1}' -f $AppName, [Guid]::NewGuid().ToString('N')
