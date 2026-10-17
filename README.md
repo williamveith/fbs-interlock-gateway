@@ -2414,10 +2414,5 @@ Cluster-only configuration, Docker Swarm state, Litestream/R2 deployment setting
 # License
 
 This project is available under the
-[FBS Interlock Gateway Public Benefit Source License 1.0](LICENSE.md).
+[GNU Affero General Public License v3 (AGPL-3.0)](LICENSE.md).
 
-Eligible individuals and organizations may use the project without charge.
-Current and former employers of the Licensor require a separate written
-license.
-
-See [Commercial and Employer Licensing](COMMERCIAL-LICENSING.md) for details.
