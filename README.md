@@ -2414,5 +2414,5 @@ Cluster-only configuration, Docker Swarm state, Litestream/R2 deployment setting
 # License
 
 This project is available under the
-[GNU Affero General Public License v3 (AGPL-3.0)](LICENSE.md).
+[GNU Affero General Public License v3 (AGPL-3.0)](LICENSE).
 
