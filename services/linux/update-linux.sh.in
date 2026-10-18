@@ -24,6 +24,22 @@ if [[ "$(id -u)" -ne 0 ]]; then
   fi
 fi
 
+RESTORE_RELEASE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --restore-release)
+      RESTORE_RELEASE=1
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1"
+      echo "Usage: $0 [--restore-release]"
+      exit 2
+      ;;
+  esac
+  shift
+done
+
 command -v curl >/dev/null 2>&1 || {
   echo "ERROR: curl is required."
   exit 1
@@ -238,29 +254,45 @@ stable_semver_key() {
 CURRENT_VERSION="$(extract_version "$CURRENT_BIN")"
 CANDIDATE_VERSION="$(extract_version "${TMP_DIR}/${ASSET}")"
 
-if [[ -z "$CURRENT_VERSION" || -z "$CANDIDATE_VERSION" ]]; then
-  echo "ERROR: Could not read version metadata from the current or candidate binary."
+# The candidate must always be a valid stable release.
+if [[ -z "$CANDIDATE_VERSION" ]]; then
+  echo "ERROR: Could not read candidate version metadata."
   exit 1
 fi
 
-CURRENT_VERSION_KEY="$(stable_semver_key "$CURRENT_VERSION")" || {
-  echo "ERROR: Installed version is not a stable semantic version: $CURRENT_VERSION"
-  echo "Automatic updates require versions in the form vMAJOR.MINOR.PATCH."
-  exit 1
-}
-
 CANDIDATE_VERSION_KEY="$(stable_semver_key "$CANDIDATE_VERSION")" || {
   echo "ERROR: Candidate version is not a stable semantic version: $CANDIDATE_VERSION"
-  echo "Automatic updates require versions in the form vMAJOR.MINOR.PATCH."
+  echo "Only stable releases in the form vMAJOR.MINOR.PATCH may be installed."
   exit 1
 }
 
-echo "Installed version: $CURRENT_VERSION"
+echo "Installed version: ${CURRENT_VERSION:-unknown}"
 echo "Latest version:    $CANDIDATE_VERSION"
 
-if [[ "$CANDIDATE_VERSION_KEY" < "$CURRENT_VERSION_KEY" ]]; then
-  echo "ERROR: Refusing authenticated release downgrade."
-  exit 1
+if [[ "$RESTORE_RELEASE" -eq 1 ]]; then
+  echo
+  echo "Release restoration requested."
+  echo "Bypassing installed-version validation and downgrade protection."
+  echo "Release signature and binary checksum verification remain enforced."
+else
+  # Normal automatic updates require a stable installed version.
+  if [[ -z "$CURRENT_VERSION" ]]; then
+    echo "ERROR: Could not read installed version metadata."
+    exit 1
+  fi
+
+  CURRENT_VERSION_KEY="$(stable_semver_key "$CURRENT_VERSION")" || {
+    echo "ERROR: Installed version is not a stable semantic version: $CURRENT_VERSION"
+    echo "Automatic updates require versions in the form vMAJOR.MINOR.PATCH."
+    echo "Use --restore-release to replace a development build."
+    exit 1
+  }
+
+  if [[ "$CANDIDATE_VERSION_KEY" < "$CURRENT_VERSION_KEY" ]]; then
+    echo "ERROR: Refusing authenticated release downgrade."
+    echo "Use --restore-release to explicitly restore the latest stable release."
+    exit 1
+  fi
 fi
 
 BACKUP="${INSTALL_DIR}/${APP}.backup.$(date -u +%Y%m%dT%H%M%SZ)"
