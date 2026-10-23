@@ -95,7 +95,6 @@ lang: en-US
   - [Configuration Reload Behavior](#configuration-reload-behavior)
 - [Logging](#logging)
 - [Repository Safety](#repository-safety)
-- [License](#License)
 
 <div class="page-break"></div>
 
@@ -2411,13 +2410,3 @@ Committed security material is limited to non-secret trust/configuration source 
 
 Cluster-only configuration, Docker Swarm state, Litestream/R2 deployment settings, and physical-node failover tooling belong in `fbs-interlock-gateway-cluster`; they should not be copied into this application repository merely to support the Swarm deployment.
 
-# License
-
-This project is available under the
-[FBS Interlock Gateway Public Benefit Source License 1.0](LICENSE.md).
-
-Eligible individuals and organizations may use the project without charge.
-Current and former employers of the Licensor require a separate written
-license.
-
-See [Commercial and Employer Licensing](COMMERCIAL-LICENSING.md) for details.
