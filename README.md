@@ -95,7 +95,6 @@ lang: en-US
   - [Configuration Reload Behavior](#configuration-reload-behavior)
 - [Logging](#logging)
 - [Repository Safety](#repository-safety)
-- [License](#License)
 
 <div class="page-break"></div>
 
