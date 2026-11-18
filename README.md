@@ -2410,3 +2410,8 @@ Committed security material is limited to non-secret trust/configuration source 
 
 Cluster-only configuration, Docker Swarm state, Litestream/R2 deployment settings, and physical-node failover tooling belong in `fbs-interlock-gateway-cluster`; they should not be copied into this application repository merely to support the Swarm deployment.
 
+# License
+
+This project is available under the
+[GNU Affero General Public License v3 (AGPL-3.0)](LICENSE).
+

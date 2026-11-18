@@ -53,6 +53,66 @@ type StatusClient interface {
 	) (shelly.SwitchStatus, error)
 }
 
+type CertificateClient interface {
+	GetServerCertificate(host string) (shelly.ServerCertificateInfo, bool)
+}
+
+const certificateRenewalWarning = 90 * 24 * time.Hour
+
+type CertificateStatus struct {
+	State         string     `json:"state"`
+	Subject       string     `json:"subject,omitempty"`
+	Issuer        string     `json:"issuer,omitempty"`
+	SerialNumber  string     `json:"serial_number,omitempty"`
+	NotBefore     *time.Time `json:"not_before,omitempty"`
+	NotAfter      *time.Time `json:"not_after,omitempty"`
+	ObservedAt    *time.Time `json:"observed_at,omitempty"`
+	DaysRemaining *int       `json:"days_remaining,omitempty"`
+}
+
+type toolStatusWithCertificate struct {
+	status.ToolStatus
+	Certificate CertificateStatus `json:"certificate"`
+}
+
+func certificateState(tool status.ToolStatus, client CertificateClient, now time.Time) CertificateStatus {
+	if config.ToolProtocol(config.Tool{Protocol: tool.Protocol}) != "https" {
+		return CertificateStatus{State: "not_applicable"}
+	}
+	if client == nil {
+		return CertificateStatus{State: "unknown"}
+	}
+	info, exists := client.GetServerCertificate(strings.TrimSpace(tool.IP))
+	if !exists {
+		return CertificateStatus{State: "unknown"}
+	}
+
+	remaining := info.NotAfter.Sub(now)
+	daysRemaining := int(remaining / (24 * time.Hour))
+	if remaining > 0 && remaining%(24*time.Hour) != 0 {
+		daysRemaining++
+	}
+	state := "valid"
+	switch {
+	case now.Before(info.NotBefore):
+		state = "not_yet_valid"
+	case !now.Before(info.NotAfter):
+		state = "expired"
+	case remaining <= certificateRenewalWarning:
+		state = "expiring_soon"
+	}
+	return CertificateStatus{
+		State:         state,
+		Subject:       info.Subject,
+		Issuer:        info.Issuer,
+		SerialNumber:  info.SerialNumber,
+		NotBefore:     &info.NotBefore,
+		NotAfter:      &info.NotAfter,
+		ObservedAt:    &info.ObservedAt,
+		DaysRemaining: &daysRemaining,
+	}
+}
+
 type LogExporter interface {
 	Export(ctx context.Context, dst io.Writer) error
 	ExportFilename(now time.Time) string
@@ -482,7 +542,19 @@ func (s *Server) handleStatus(
 		)
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	var certificateClient CertificateClient
+	if provider, ok := s.statusClient.(CertificateClient); ok {
+		certificateClient = provider
+	}
+	now := time.Now().UTC()
+	response := make([]toolStatusWithCertificate, len(results))
+	for i, row := range results {
+		response[i] = toolStatusWithCertificate{
+			ToolStatus:  row,
+			Certificate: certificateState(row, certificateClient, now),
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) statusSnapshot(
@@ -516,8 +588,6 @@ func (s *Server) refreshStatuses(revision uint64) {
 	)
 	defer cancel()
 
-	// Always release the refresh lock, regardless of whether collection
-	// completes successfully or the refresh context expires.
 	defer func() {
 		s.statusMu.Lock()
 		s.statusRefreshInFlight = false
@@ -540,8 +610,6 @@ func (s *Server) collectStatuses(
 	safeOutput := s.store.SafeOutput()
 	enabledCount := 0
 
-	// Disabled tools do not require a Shelly request, so publish their
-	// configuration rows immediately.
 	for _, tool := range cfg.Tools {
 		if tool.Enabled {
 			enabledCount++
@@ -581,8 +649,6 @@ func (s *Server) collectStatuses(
 					s.statusClient.GetStatusAdmin(ctx, tool)
 
 				if errors.Is(err, shelly.ErrAdminStatusDeferred) {
-					// Preserve the existing row. The FBS operation that displaced
-					// this probe will publish the authoritative result.
 					continue
 				}
 

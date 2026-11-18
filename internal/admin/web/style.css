@@ -416,3 +416,13 @@ footer a:hover {
 footer a:active {
     transform: translateY(1px);
 }
+
+/* Passive X.509 certificate status. */
+.certificate-hint {
+    color: var(--muted);
+    margin: 0 0 0.75rem;
+}
+.certificate-warning {
+    color: var(--warning);
+    font-weight: 700;
+}
